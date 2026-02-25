@@ -8,7 +8,7 @@ validation loss (and optionally RMSE in meters) each epoch and save the best che
 from __future__ import annotations
 
 import math
-from typing import Iterable, Optional, Tuple
+from typing import Iterable, Tuple
 
 import torch
 
@@ -34,16 +34,33 @@ def _rmse_meters_from_pred(model, samples, pred, mask, norm_scale_m: float) -> T
 
     Assumes `samples` are globally normalized.
 
-    - mean/std:  x_norm = (x - mean) / std      => RMSE_m = RMSE_norm * std
+    - mean/std:  x_norm = (x - mean) / std       => RMSE_m = RMSE_norm * std
     - min/max:   x_norm = (x - min) / (max-min) => RMSE_m = RMSE_norm * (max-min)
+
+    Important:
+      `pred` is produced under autocast and can be float16/bfloat16.
+      `target` from patchify(samples) is usually float32.
+      We compute RMSE in float32 to avoid dtype mismatch and improve numerical stability.
     """
-    target = model.patchify(samples)
-    mse = (pred - target) ** 2
+    target = model.patchify(samples)  # [N, L, P]
+
+    # Compute metrics in float32 (safe + stable)
+    pred_f = pred.float()
+    target_f = target.float()
+
+    # paste keep patches from target into pred
+    # mask: 0 keep, 1 remove
+    keep = (mask == 0)
+    pred_paste = pred_f.clone()
+    pred_paste[keep] = target_f[keep]
+
+    mse = (pred_paste - target_f) ** 2
     mse = mse.mean(dim=-1)  # [N, L] mean over patch pixels
 
-    # mask: 0 keep, 1 remove
-    mask_sum = mask.sum().clamp(min=1.0)
-    rmse_mask = torch.sqrt((mse * mask).sum() / mask_sum)
+    mask_f = mask.float()
+    mask_sum = mask_f.sum().clamp(min=1.0)
+
+    rmse_mask = torch.sqrt((mse * mask_f).sum() / mask_sum)
     rmse_all = torch.sqrt(mse.mean())
 
     scale = torch.as_tensor(float(norm_scale_m), device=samples.device, dtype=rmse_mask.dtype)
@@ -81,6 +98,7 @@ def train_one_epoch(
         if data_iter_step % accum_iter == 0:
             lr_sched.adjust_learning_rate(optimizer, data_iter_step / len(data_loader) + epoch, args)
 
+        # NOTE: FutureWarning about autocast API is harmless; we keep compatibility.
         with torch.cuda.amp.autocast(enabled=getattr(args, "amp", True)):
             loss, pred, mask = model(samples, mask_ratio=args.mask_ratio)
 

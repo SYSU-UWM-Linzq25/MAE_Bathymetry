@@ -21,8 +21,9 @@ import datetime
 import json
 import os
 import time
+import csv
 from pathlib import Path
-from typing import Dict, Optional
+from typing import Dict, Optional, List, Any
 
 import numpy as np
 import torch
@@ -105,6 +106,32 @@ def get_args_parser():
     parser.add_argument('--eval_rmse', action='store_true',
                         help='Also compute RMSE (masked + all) in meters during val/test evaluation.')
 
+    # curves / early-stop helpers
+    parser.add_argument('--history_csv', default='', type=str,
+                        help='Where to save epoch-level history CSV (default: <output_dir>/history.csv).')
+    parser.add_argument('--plot_every', default=1, type=int,
+                        help='Update curve PNGs every N epochs (default: 1).')
+    parser.add_argument('--no_plot_curves', action='store_true',
+                        help='Disable generating curve PNGs during training.')
+    parser.add_argument('--early_stop_patience', default=0, type=int,
+                        help='If >0, enable early stopping when metric does not improve for N epochs.')
+    parser.add_argument('--early_stop_metric', default='val_loss',
+                        choices=['val_loss', 'val_rmse_m_mask', 'val_rmse_m_all'],
+                        help='Metric to monitor for early stopping.')
+    parser.add_argument('--early_stop_min_delta', default=0.0, type=float,
+                        help='Minimum improvement to reset early stop patience.')
+    parser.add_argument('--early_stop_warmup_epochs', default=0, type=int,
+                        help='Do not allow early stopping until this epoch (warmup).')
+    parser.add_argument('--early_stop_start_threshold', default=0.0, type=float,
+                        help=('Only start counting early-stop patience after the monitored metric '
+                              'reaches this threshold (e.g., RMSE <= threshold). 0 disables.'))
+
+    # best checkpoint selection
+    parser.add_argument('--best_metric', default='',
+                        choices=['', 'val_loss', 'val_rmse_m_mask', 'val_rmse_m_all'],
+                        help=('Metric used to save checkpoint-best.pth. '
+                              'If empty: use val_rmse_m_mask when --eval_rmse, else val_loss.'))
+
     # misc
     parser.add_argument('--output_dir', default='./output_dem', type=str)
     parser.add_argument('--log_dir', default='./output_dem', type=str)
@@ -139,6 +166,74 @@ def _save_checkpoint(path: str, model, optimizer, loss_scaler, epoch: int, args,
         'dem_norm': dem_norm,
     }
     misc.save_on_master(to_save, path)
+
+
+def _safe_float(v: Any) -> float:
+    try:
+        return float(v)
+    except Exception:
+        return float('nan')
+
+
+def _load_history(csv_path: Path) -> List[Dict[str, float]]:
+    if not csv_path.exists():
+        return []
+    rows: List[Dict[str, float]] = []
+    with csv_path.open('r', newline='', encoding='utf-8') as f:
+        reader = csv.DictReader(f)
+        for r in reader:
+            rows.append({k: _safe_float(v) for k, v in r.items()})
+    return rows
+
+
+def _save_history(csv_path: Path, rows: List[Dict[str, float]], fieldnames: List[str]) -> None:
+    csv_path.parent.mkdir(parents=True, exist_ok=True)
+    with csv_path.open('w', newline='', encoding='utf-8') as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+        for r in rows:
+            writer.writerow({k: r.get(k, float('nan')) for k in fieldnames})
+
+
+def _maybe_plot_curves(history: List[Dict[str, float]], out_dir: Path, plot_rmse: bool) -> None:
+    """Generate/overwrite curve PNGs from history.
+
+    This is best-effort: if matplotlib is not available, training continues.
+    """
+    try:
+        import matplotlib
+        matplotlib.use('Agg')
+        import matplotlib.pyplot as plt
+    except Exception as e:
+        print(f"[WARN] matplotlib not available; skip plotting curves. ({e})")
+        return
+
+    if not history:
+        return
+
+    epochs = [int(r.get('epoch', 0)) for r in history]
+
+    def _plot_one(y_train_key: str, y_val_key: str, ylabel: str, out_name: str):
+        y_tr = [r.get(y_train_key, float('nan')) for r in history]
+        y_va = [r.get(y_val_key, float('nan')) for r in history]
+        if all(np.isnan(y_tr)) and all(np.isnan(y_va)):
+            return
+        plt.figure()
+        plt.plot(epochs, y_tr, label='train')
+        plt.plot(epochs, y_va, label='val')
+        plt.xlabel('epoch')
+        plt.ylabel(ylabel)
+        plt.legend()
+        plt.grid(True, alpha=0.3)
+        plt.tight_layout()
+        plt.savefig(out_dir / out_name, dpi=150)
+        plt.close()
+
+    _plot_one('train_loss', 'val_loss', 'loss (MSE, normalized)', 'curve_loss.png')
+
+    if plot_rmse:
+        _plot_one('train_rmse_m_mask', 'val_rmse_m_mask', 'RMSE (m) on masked patches', 'curve_rmse_mask.png')
+        _plot_one('train_rmse_m_all', 'val_rmse_m_all', 'RMSE (m) on pasted full tile', 'curve_rmse_all.png')
 
 
 def main(args):
@@ -315,8 +410,22 @@ def main(args):
     if misc.is_main_process() and SummaryWriter is not None:
         log_writer = SummaryWriter(log_dir=args.log_dir)
 
+    # history & curve outputs (main process only)
+    history_csv = Path(args.history_csv) if args.history_csv else (out_dir / 'history.csv')
+    history: List[Dict[str, float]] = _load_history(history_csv) if misc.is_main_process() else []
+
+    # early stopping state
+    best_metric = float('inf')
+    bad_epochs = 0
+    es_activated = False
+
     print_freq = 20
-    best_val = float('inf')
+    # select best checkpoint metric
+    best_metric_name = args.best_metric
+    if best_metric_name == '':
+        best_metric_name = 'val_rmse_m_mask' if args.eval_rmse else 'val_loss'
+
+    best_val = float('inf')  # best value for best_metric_name
     best_epoch = -1
 
     start_time = time.time()
@@ -335,12 +444,34 @@ def main(args):
 
         val_loss = float(val_stats.get('loss', float('inf')))
 
+        # metric used for selecting checkpoint-best
+        if best_metric_name == 'val_loss':
+            val_best_metric = val_loss
+        else:
+            key = best_metric_name.replace('val_', '')
+            val_best_metric = float(val_stats.get(key, float('inf')))
+            if not np.isfinite(val_best_metric):
+                if misc.is_main_process():
+                    print(f"[WARN] best_metric={best_metric_name} unavailable (did you forget --eval_rmse?). Fallback to val_loss.")
+                best_metric_name = 'val_loss'
+                val_best_metric = val_loss
+
+        # ---- epoch-level tensorboard (clean curves) ----
+        if log_writer is not None and misc.is_main_process():
+            log_writer.add_scalar('epoch/train_loss', float(train_stats.get('loss', float('nan'))), epoch)
+            log_writer.add_scalar('epoch/val_loss', val_loss, epoch)
+            if args.eval_rmse:
+                log_writer.add_scalar('epoch/train_rmse_m_mask', float(train_stats.get('rmse_m_mask', float('nan'))), epoch)
+                log_writer.add_scalar('epoch/val_rmse_m_mask', float(val_stats.get('rmse_m_mask', float('nan'))), epoch)
+                log_writer.add_scalar('epoch/train_rmse_m_all', float(train_stats.get('rmse_m_all', float('nan'))), epoch)
+                log_writer.add_scalar('epoch/val_rmse_m_all', float(val_stats.get('rmse_m_all', float('nan'))), epoch)
+
         # save checkpoints
         if misc.is_main_process():
             _save_checkpoint(str(out_dir / f'checkpoint-{epoch:04d}.pth'), model_without_ddp, optimizer, loss_scaler, epoch, args, dem_norm)
 
-            if val_loss < best_val:
-                best_val = val_loss
+            if val_best_metric < best_val:
+                best_val = val_best_metric
                 best_epoch = epoch
                 _save_checkpoint(str(out_dir / 'checkpoint-best.pth'), model_without_ddp, optimizer, loss_scaler, epoch, args, dem_norm)
 
@@ -349,14 +480,89 @@ def main(args):
                     'epoch': epoch,
                     'train': train_stats,
                     'val': val_stats,
-                    'best_val': best_val,
+                    'best_metric': best_metric_name,
+                    'best_metric_value': best_val,
                     'best_epoch': best_epoch,
                 }) + '\n')
+
+            # ---- update history.csv (epoch-level) ----
+            row = {
+                'epoch': float(epoch),
+                'train_loss': float(train_stats.get('loss', float('nan'))),
+                'val_loss': float(val_stats.get('loss', float('nan'))),
+                'lr': float(train_stats.get('lr', float('nan'))),
+            }
+            if args.eval_rmse:
+                row.update({
+                    'train_rmse_m_mask': float(train_stats.get('rmse_m_mask', float('nan'))),
+                    'val_rmse_m_mask': float(val_stats.get('rmse_m_mask', float('nan'))),
+                    'train_rmse_m_all': float(train_stats.get('rmse_m_all', float('nan'))),
+                    'val_rmse_m_all': float(val_stats.get('rmse_m_all', float('nan'))),
+                })
+
+            # replace existing epoch row if present (safe for resume)
+            history = [r for r in history if int(r.get('epoch', -1)) != epoch]
+            history.append(row)
+            history.sort(key=lambda r: int(r.get('epoch', 0)))
+
+            fieldnames = ['epoch', 'lr', 'train_loss', 'val_loss']
+            if args.eval_rmse:
+                fieldnames += ['train_rmse_m_mask', 'val_rmse_m_mask', 'train_rmse_m_all', 'val_rmse_m_all']
+            _save_history(history_csv, history, fieldnames)
+
+            # ---- plot curves (best-effort) ----
+            if (not args.no_plot_curves) and (args.plot_every > 0) and (epoch % args.plot_every == 0):
+                _maybe_plot_curves(history, out_dir, plot_rmse=bool(args.eval_rmse))
+
+        # ---- optional early stopping ----
+        if args.early_stop_patience and args.early_stop_patience > 0:
+            metric_name = args.early_stop_metric
+            if metric_name == 'val_loss':
+                cur = float(val_stats.get('loss', float('inf')))
+            else:
+                # val_stats uses keys: rmse_m_mask / rmse_m_all
+                cur = float(val_stats.get(metric_name.replace('val_', ''), float('inf')))
+                if not np.isfinite(cur):
+                    cur = float(val_stats.get('loss', float('inf')))
+                    metric_name = 'val_loss'
+
+            # Activate early-stop only after:
+            #   1) warmup epochs are finished, AND
+            #   2) (optional) metric reaches a target threshold, e.g., RMSE <= threshold
+            warmup_ok = epoch >= int(getattr(args, 'early_stop_warmup_epochs', 0) or 0)
+            thr = float(getattr(args, 'early_stop_start_threshold', 0.0) or 0.0)
+            thr_ok = True
+            if thr > 0:
+                thr_ok = cur <= thr
+
+            if not es_activated:
+                if warmup_ok and thr_ok:
+                    es_activated = True
+                    best_metric = cur
+                    bad_epochs = 0
+                    if misc.is_main_process():
+                        if thr > 0:
+                            print(f"[EARLY-STOP] Activated at epoch={epoch} (metric={metric_name}={cur:.4f} <= {thr}).")
+                        else:
+                            print(f"[EARLY-STOP] Activated at epoch={epoch} (metric={metric_name}={cur:.4f}).")
+                else:
+                    # Not activated yet: do not accumulate patience.
+                    pass
+            else:
+                if cur < best_metric - float(args.early_stop_min_delta):
+                    best_metric = cur
+                    bad_epochs = 0
+                else:
+                    bad_epochs += 1
+                    if bad_epochs >= int(args.early_stop_patience):
+                        if misc.is_main_process():
+                            print(f"[EARLY-STOP] No improvement in {metric_name} for {bad_epochs} epochs. Stop at epoch={epoch}. best={best_metric:.4f}")
+                        break
 
     total_time = time.time() - start_time
     total_time_str = str(datetime.timedelta(seconds=int(total_time)))
     if misc.is_main_process():
-        print(f"Training time {total_time_str}; best_epoch={best_epoch} best_val_loss={best_val:.6f}")
+        print(f"Training time {total_time_str}; best_epoch={best_epoch} best_{best_metric_name}={best_val:.6f}")
 
     # ---- final evaluations (optional) ----
     def _maybe_eval(split_name: str, dir_path: str, list_path: str, out_tag: str):
@@ -386,10 +592,10 @@ def main(args):
             save_json(stats, str(out_dir / f'eval_{out_tag}.json'))
             print(f"[EVAL] {split_name} -> {stats}")
 
-    # test
+    # test (optional; if you don't pass test_dir/test_list, this does nothing)
     _maybe_eval('test', test_dir if os.path.isdir(test_dir) else '', args.test_list, 'test')
 
-    # KY holdout or any extra
+    # KY holdout or any extra (optional)
     if args.extra_eval_dir and os.path.isdir(args.extra_eval_dir):
         _maybe_eval('extra', args.extra_eval_dir, '', 'extra')
 
