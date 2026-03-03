@@ -39,6 +39,124 @@ import models_mae
 from engine_pretrain import train_one_epoch, evaluate_one_epoch
 from util.dem_dataset import DEMTileDataset, compute_dem_stats, load_json, save_json
 
+def _denorm(x: torch.Tensor, args) -> torch.Tensor:
+    # x: [H,W] or [1,H,W] normalized
+    if args.norm_method == 'meanstd':
+        return x * args.norm_std + args.norm_mean
+    else:
+        vmin = float(args.dem_norm['min'])
+        vmax = float(args.dem_norm['max'])
+        return x * (vmax - vmin) + vmin
+
+def _write_geotiff_like(ref_path: str, out_path: Path, arr2d, dtype: str = "float32", nodata=None):
+    """
+    Write a single-band GeoTIFF using ref_path as template (CRS/transform/tiling, etc.)
+    arr2d: np.ndarray [H,W]
+    """
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+
+    try:
+        import numpy as np
+        import rasterio
+
+        with rasterio.open(ref_path) as src:
+            profile = src.profile.copy()
+
+        # Safety: ensure shape matches
+        h, w = arr2d.shape
+        if profile.get("height", None) != h or profile.get("width", None) != w:
+            # fallback to plain tiff (no georef) if mismatch
+            import tifffile
+            tifffile.imwrite(str(out_path), arr2d.astype(np.float32))
+            return
+
+        profile.update(
+            driver="GTiff",
+            count=1,
+            dtype=dtype,
+            nodata=nodata,
+            compress=profile.get("compress", "LZW"),
+        )
+
+        with rasterio.open(str(out_path), "w", **profile) as dst:
+            dst.write(arr2d, 1)
+
+    except Exception:
+        # fallback: plain TIFF (no georef)
+        import numpy as np
+        import tifffile
+        tifffile.imwrite(str(out_path), arr2d.astype(np.float32))
+
+@torch.no_grad()
+def get_or_make_vis_indices(dataset, n: int, seed: int, save_path: Path) -> np.ndarray:
+    save_path.parent.mkdir(parents=True, exist_ok=True)
+    if save_path.exists():
+        idxs = np.loadtxt(save_path, dtype=int)
+        return np.atleast_1d(idxs)
+
+    rng = np.random.RandomState(seed)
+    n = min(int(n), len(dataset))
+    idxs = rng.choice(len(dataset), size=n, replace=False).astype(int)
+    np.savetxt(save_path, idxs, fmt="%d")
+    return idxs
+
+
+@torch.no_grad()
+def visualize_fixed_tiles_geotiff(model, dataset, idxs: np.ndarray, device, epoch: int, args, out_dir: Path, split_name: str):
+    """
+    Save GeoTIFFs for fixed tiles:
+      - gt_denorm_m
+      - pred_denorm_m (raw decoder output unpatchify)
+      - recon_denorm_m (paste keep from input + pred on masked)
+      - err_m (recon - gt)
+      - mask (1=masked)
+    """
+    import numpy as np
+
+    model.eval()
+    out_epoch = out_dir / "vis_tif" / split_name / f"epoch{epoch:04d}"
+    out_epoch.mkdir(parents=True, exist_ok=True)
+
+    for k, idx in enumerate(idxs.tolist()):
+        sample = dataset[int(idx)]
+        if isinstance(sample, (tuple, list)):
+            x, ref_path = sample
+        else:
+            x = sample
+            ref_path = dataset.files[int(idx)]
+
+        x = x.unsqueeze(0).to(device, non_blocking=True)  # [1,1,H,W]
+
+        with torch.cuda.amp.autocast(enabled=getattr(args, "amp", True)):
+            _, pred, mask = model(x, mask_ratio=args.mask_ratio)
+
+        # images (normalized space)
+        pred_img = model.unpatchify(pred)[0, 0].float().cpu()  # [H,W]
+        p = model.patch_embed.patch_size[0]
+        mask_img = mask.unsqueeze(-1).repeat(1, 1, p * p * args.in_chans)
+        mask_img = model.unpatchify(mask_img)[0, 0].float().cpu()  # [H,W], 1=masked
+        x0 = x[0, 0].float().cpu()
+        recon = x0 * (1 - mask_img) + pred_img * mask_img
+
+        # denorm to meters
+        gt_m = _denorm(x0, args).cpu()
+        pred_m = _denorm(pred_img, args).cpu()
+        recon_m = _denorm(recon, args).cpu()
+        err_m = (recon_m - gt_m).cpu()
+
+        # to numpy
+        gt_np = gt_m.numpy().astype(np.float32, copy=False)
+        pred_np = pred_m.numpy().astype(np.float32, copy=False)
+        recon_np = recon_m.numpy().astype(np.float32, copy=False)
+        err_np = err_m.numpy().astype(np.float32, copy=False)
+        mask_np = (mask_img.numpy() > 0.5).astype(np.uint8)
+
+        base = f"idx{int(idx):06d}"
+        _write_geotiff_like(ref_path, out_epoch / f"{base}_gt_m.tif", gt_np, dtype="float32", nodata=None)
+        _write_geotiff_like(ref_path, out_epoch / f"{base}_pred_m.tif", pred_np, dtype="float32", nodata=None)
+        _write_geotiff_like(ref_path, out_epoch / f"{base}_recon_m.tif", recon_np, dtype="float32", nodata=None)
+        _write_geotiff_like(ref_path, out_epoch / f"{base}_err_m.tif", err_np, dtype="float32", nodata=None)
+        _write_geotiff_like(ref_path, out_epoch / f"{base}_mask.tif", mask_np, dtype="uint8", nodata=0)
 
 def get_args_parser():
     parser = argparse.ArgumentParser('MAE pre-training (DEM GeoTIFF)', add_help=False)
@@ -81,6 +199,9 @@ def get_args_parser():
                         help='Normalize target patches per-sample (original MAE). For DEM, usually keep False.')
     parser.add_argument('--use_instance_norm', action='store_true', help='Apply InstanceNorm2d on input (per-tile). Usually OFF if you already use global normalization.')
 
+    parser.add_argument('--bottleneck_norm', default='none', choices=['none', 'inst1d'])
+    parser.add_argument('--loss_mode', default='mse', choices=['mse', 'si_mse'])
+
     # --- training ---
     parser.add_argument('--batch_size', default=64, type=int)
     parser.add_argument('--epochs', default=400, type=int)
@@ -105,7 +226,11 @@ def get_args_parser():
     # evaluation
     parser.add_argument('--eval_rmse', action='store_true',
                         help='Also compute RMSE (masked + all) in meters during val/test evaluation.')
-
+    
+    # Visulization
+    parser.add_argument('--vis_every', default=5, type=int)
+    parser.add_argument('--vis_n', default=10, type=int)
+    
     # curves / early-stop helpers
     parser.add_argument('--history_csv', default='', type=str,
                         help='Where to save epoch-level history CSV (default: <output_dir>/history.csv).')
@@ -273,6 +398,24 @@ def main(args):
         return_path=False,
     )
 
+    # ---- visualization datasets (NO random flip; can return file path) ----
+    train_vis_ds = DEMTileDataset(
+        dir_path=train_dir if not args.train_list else None,
+        list_path=args.train_list if args.train_list else None,
+        input_size=args.input_size,
+        nodata=args.nodata,
+        random_flip=False,
+        return_path=True,
+    )
+    val_vis_ds = DEMTileDataset(
+        dir_path=val_dir if not args.val_list else None,
+        list_path=args.val_list if args.val_list else None,
+        input_size=args.input_size,
+        nodata=args.nodata,
+        random_flip=False,
+        return_path=True,
+    )
+
     # ---- compute / load global normalization (TRAIN only) ----
     norm_path = args.norm_json
     out_dir = Path(args.output_dir)
@@ -317,12 +460,16 @@ def main(args):
         std = float(dem_norm['std'])
         train_ds.set_norm(mean, std)
         val_ds.set_norm(mean, std)
+        train_vis_ds.set_norm(mean, std)
+        val_vis_ds.set_norm(mean, std)
     else:
         # minmax scaling
         vmin = float(dem_norm['min'])
         vmax = float(dem_norm['max'])
         train_ds.set_norm(vmin, vmax, method='minmax')
         val_ds.set_norm(vmin, vmax, method='minmax')
+        train_vis_ds.set_norm(vmin, vmax, method='minmax')
+        val_vis_ds.set_norm(vmin, vmax, method='minmax')
 
     # also store on args for RMSE(m) conversion
     args.dem_norm = dem_norm
@@ -335,6 +482,14 @@ def main(args):
         args.norm_scale_m = args.norm_std
     else:
         args.norm_scale_m = float(dem_norm.get('max', 1.0)) - float(dem_norm.get('min', 0.0))
+
+    # ---- fixed visualization indices (stable across epochs/resumes) ----
+    if misc.is_main_process() and args.vis_every > 0 and args.vis_n > 0:
+        vis_root = out_dir / "vis_tif"
+        train_vis_idxs = get_or_make_vis_indices(train_vis_ds, args.vis_n, seed=args.seed + 123, save_path=vis_root / "train_indices.txt")
+        val_vis_idxs   = get_or_make_vis_indices(val_vis_ds,   args.vis_n, seed=args.seed + 456, save_path=vis_root / "val_indices.txt")
+    else:
+        train_vis_idxs, val_vis_idxs = None, None
 
     # ---- samplers & loaders ----
     if args.distributed:
@@ -369,6 +524,8 @@ def main(args):
         img_size=args.input_size,
         in_chans=args.in_chans,
         use_instance_norm=args.use_instance_norm,
+        bottleneck_norm=args.bottleneck_norm,
+        loss_mode=args.loss_mode,
     )
     model.to(device)
 
@@ -442,6 +599,12 @@ def main(args):
             model, val_loader, device, epoch, log_writer=log_writer, args=args, prefix='val'
         )
 
+        # ---- visualization (every N epochs; FIXED tiles; GeoTIFF) ----
+        if (misc.is_main_process() and args.vis_every > 0 and (epoch % args.vis_every == 0)
+            and (train_vis_idxs is not None) and (val_vis_idxs is not None)):
+            visualize_fixed_tiles_geotiff(model_without_ddp, train_vis_ds, train_vis_idxs, device, epoch, args, out_dir, split_name="train")
+            visualize_fixed_tiles_geotiff(model_without_ddp, val_vis_ds,   val_vis_idxs,   device, epoch, args, out_dir, split_name="val")
+                    
         val_loss = float(val_stats.get('loss', float('inf')))
 
         # metric used for selecting checkpoint-best
@@ -598,7 +761,6 @@ def main(args):
     # KY holdout or any extra (optional)
     if args.extra_eval_dir and os.path.isdir(args.extra_eval_dir):
         _maybe_eval('extra', args.extra_eval_dir, '', 'extra')
-
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser('MAE pre-training (DEM GeoTIFF)', parents=[get_args_parser()])

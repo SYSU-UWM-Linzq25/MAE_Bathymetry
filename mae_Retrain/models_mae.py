@@ -20,12 +20,22 @@ class MaskedAutoencoderViT(nn.Module):
                  embed_dim=1024, depth=24, num_heads=16,
                  decoder_embed_dim=512, decoder_depth=8, decoder_num_heads=16,
                  mlp_ratio=4., norm_layer=nn.LayerNorm, norm_pix_loss=False,
-                 save_path="", use_instance_norm: bool = False):
+                 save_path="", use_instance_norm: bool = False,
+                 bottleneck_norm: str = "none",
+                 loss_mode: str = "mse"):
         super().__init__()
         # Optional: per-tile instance normalization (disabled by default).
         # This can be useful if you want each DEM tile to have zero-mean/unit-variance
         # before patch embedding, but typically you will use global normalization from the TRAIN split.
         self.input_norm = nn.InstanceNorm2d(in_chans, affine=False, track_running_stats=False) if use_instance_norm else None
+        self.loss_mode = loss_mode
+        # bottleneck norm
+        if bottleneck_norm in (None, "", "none"):
+            self.bottleneck_norm = None
+        elif bottleneck_norm == "inst1d":
+            self.bottleneck_norm = nn.InstanceNorm1d(embed_dim, affine=True, track_running_stats=False)
+        else:
+            raise ValueError(f"Unknown bottleneck_norm={bottleneck_norm}")
         # --------------------------------------------------------------------------
         # MAE encoder specifics
         self.patch_embed = PatchEmbed(img_size, patch_size, in_chans, embed_dim)
@@ -51,8 +61,6 @@ class MaskedAutoencoderViT(nn.Module):
         # --------------------------------------------------------------------------
         self.norm_pix_loss = norm_pix_loss
         # Optional instance normalization on input (per-tile).
-        self.input_norm = nn.InstanceNorm2d(in_chans, affine=False, track_running_stats=False) \
-            if use_instance_norm else None
         self.initialize_weights()
         self.save_path=save_path
     def initialize_weights(self):
@@ -209,26 +217,54 @@ class MaskedAutoencoderViT(nn.Module):
         pred: [N, L, p*p*3]
         mask: [N, L], 0 is keep, 1 is remove, 
         """
+
         target = self.patchify(imgs)
         if self.norm_pix_loss:
             mean = target.mean(dim=-1, keepdim=True)
             var = target.var(dim=-1, keepdim=True)
             target = (target - mean) / (var + 1.e-6)**.5
+            
+        if self.loss_mode == "si_mse":
+            e = pred - target  # [N, L, P]
+
+            # mask_full: [N, L, P]
+            mask_full = mask.unsqueeze(-1).float().expand_as(e)
+            den = mask_full.sum(dim=(1, 2)).clamp_min(1.0)              # [N]
+            bias = (e * mask_full).sum(dim=(1, 2)) / den                # [N] 每个tile的系统偏移(在masked区域上)
+
+            e = e - bias[:, None, None]
+            loss = (e ** 2).mean(dim=-1)                                # [N, L]
+            loss = (loss * mask).sum() / mask.sum().clamp_min(1.0)
+            return loss
+        
+        # default mse (masked-only)
         loss = (pred - target) ** 2
         loss = loss.mean(dim=-1)  # [N, L], mean loss per patch
         loss = (loss * mask).sum() / mask.sum()  # mean loss on removed patches
         return loss
+    
+    def _apply_bottleneck_norm(self, latent: torch.Tensor) -> torch.Tensor:
+        if getattr(self, "bottleneck_norm", None) is None:
+            return latent
+        cls, tok = latent[:, :1, :], latent[:, 1:, :]   # [N,1,D], [N,L,D]
+        tok = tok.transpose(1, 2)                       # [N,D,L]
+        tok = self.bottleneck_norm(tok)
+        tok = tok.transpose(1, 2)                       # [N,L,D]
+        return torch.cat([cls, tok], dim=1)
+
     def forward(self, imgs, mask_ratio=0.75, file_name=""):
         # Optional per-tile InstanceNorm (apply ONCE)
         if self.input_norm is not None:
             imgs = self.input_norm(imgs)
         latent, mask, ids_restore = self.forward_encoder(imgs, mask_ratio)
+        latent = self._apply_bottleneck_norm(latent) # add instanceNorm - Linzq25 - Mar 1st 2026
         #save_path = "/home/uwm/maopuxu/MAE_Topography_Reconstruction/MAE-Topography/after_codes/latent_code"
         if self.save_path != "" and file_name != "":
             torch.save(latent, f'{self.save_path}/{file_name}_latent.pt')
         pred = self.forward_decoder(latent, ids_restore)  # [N, L, p*p*3]
         loss = self.forward_loss(imgs, pred, mask)
         return loss, pred, mask
+        
 def mae_vit_base_patch16_dec512d8b(**kwargs):
     model = MaskedAutoencoderViT(
         patch_size=16, embed_dim=768, depth=12, num_heads=12,
