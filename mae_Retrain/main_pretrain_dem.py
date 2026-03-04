@@ -241,7 +241,13 @@ def get_args_parser():
     parser.add_argument('--early_stop_patience', default=0, type=int,
                         help='If >0, enable early stopping when metric does not improve for N epochs.')
     parser.add_argument('--early_stop_metric', default='val_loss',
-                        choices=['val_loss', 'val_rmse_m_mask', 'val_rmse_m_all'],
+                        choices=[
+                          'val_loss',
+                          'val_rmse_m_mask', 'val_rmse_m_all',
+                          'val_rmse_m_mask_si', 'val_rmse_m_all_si',
+                          'val_rmse_m_mask_viscorr', 'val_rmse_m_all_viscorr',
+                          'val_bias_m_mask', 'val_bias_m_vis_med',
+                        ],
                         help='Metric to monitor for early stopping.')
     parser.add_argument('--early_stop_min_delta', default=0.0, type=float,
                         help='Minimum improvement to reset early stop patience.')
@@ -253,7 +259,14 @@ def get_args_parser():
 
     # best checkpoint selection
     parser.add_argument('--best_metric', default='',
-                        choices=['', 'val_loss', 'val_rmse_m_mask', 'val_rmse_m_all'],
+                        choices=[
+                          '',
+                          'val_loss',
+                          'val_rmse_m_mask', 'val_rmse_m_all',
+                          'val_rmse_m_mask_si', 'val_rmse_m_all_si',
+                          'val_rmse_m_mask_viscorr', 'val_rmse_m_all_viscorr',
+                          'val_bias_m_mask', 'val_bias_m_vis_med',
+                        ],
                         help=('Metric used to save checkpoint-best.pth. '
                               'If empty: use val_rmse_m_mask when --eval_rmse, else val_loss.'))
 
@@ -341,11 +354,18 @@ def _maybe_plot_curves(history: List[Dict[str, float]], out_dir: Path, plot_rmse
     def _plot_one(y_train_key: str, y_val_key: str, ylabel: str, out_name: str):
         y_tr = [r.get(y_train_key, float('nan')) for r in history]
         y_va = [r.get(y_val_key, float('nan')) for r in history]
-        if all(np.isnan(y_tr)) and all(np.isnan(y_va)):
+        
+        has_tr = not all(np.isnan(y_tr))
+        has_va = not all(np.isnan(y_va))
+        if (not has_tr) and (not has_va):
             return
+        
         plt.figure()
-        plt.plot(epochs, y_tr, label='train')
-        plt.plot(epochs, y_va, label='val')
+        if has_tr:
+            plt.plot(epochs, y_tr, label='train')
+        if has_va:
+            plt.plot(epochs, y_va, label='val')
+
         plt.xlabel('epoch')
         plt.ylabel(ylabel)
         plt.legend()
@@ -354,12 +374,20 @@ def _maybe_plot_curves(history: List[Dict[str, float]], out_dir: Path, plot_rmse
         plt.savefig(out_dir / out_name, dpi=150)
         plt.close()
 
-    _plot_one('train_loss', 'val_loss', 'loss (MSE, normalized)', 'curve_loss.png')
+    _plot_one('train_loss', 'val_loss', 'loss (normalized)', 'curve_loss.png')
 
     if plot_rmse:
         _plot_one('train_rmse_m_mask', 'val_rmse_m_mask', 'RMSE (m) on masked patches', 'curve_rmse_mask.png')
         _plot_one('train_rmse_m_all', 'val_rmse_m_all', 'RMSE (m) on pasted full tile', 'curve_rmse_all.png')
 
+        _plot_one('train_rmse_m_mask_si', 'val_rmse_m_mask_si', 'RMSE (m) masked (shift-invariant)', 'curve_rmse_mask_si.png')
+        _plot_one('train_rmse_m_all_si',  'val_rmse_m_all_si',  'RMSE (m) all (shift-invariant)',    'curve_rmse_all_si.png')
+
+        _plot_one('train_rmse_m_mask_viscorr', 'val_rmse_m_mask_viscorr', 'RMSE (m) masked (visible bias-corr)', 'curve_rmse_mask_viscorr.png')
+        _plot_one('train_rmse_m_all_viscorr',  'val_rmse_m_all_viscorr',  'RMSE (m) all (visible bias-corr)',    'curve_rmse_all_viscorr.png')
+
+        _plot_one('train_bias_m_mask',    'val_bias_m_mask',    'Bias (m) estimated on masked',   'curve_bias_mask.png')
+        _plot_one('train_bias_m_vis_med', 'val_bias_m_vis_med', 'Bias (m) visible-median',        'curve_bias_vis_med.png')
 
 def main(args):
     misc.init_distributed_mode(args)
@@ -655,14 +683,31 @@ def main(args):
                 'val_loss': float(val_stats.get('loss', float('nan'))),
                 'lr': float(train_stats.get('lr', float('nan'))),
             }
-            if args.eval_rmse:
-                row.update({
-                    'train_rmse_m_mask': float(train_stats.get('rmse_m_mask', float('nan'))),
-                    'val_rmse_m_mask': float(val_stats.get('rmse_m_mask', float('nan'))),
-                    'train_rmse_m_all': float(train_stats.get('rmse_m_all', float('nan'))),
-                    'val_rmse_m_all': float(val_stats.get('rmse_m_all', float('nan'))),
-                })
 
+            if args.eval_rmse:
+                nan = float('nan')
+                row.update({
+                    'train_rmse_m_mask': float(train_stats.get('rmse_m_mask', nan)),
+                    'val_rmse_m_mask': float(val_stats.get('rmse_m_mask', nan)),
+                    'train_rmse_m_all': float(train_stats.get('rmse_m_all', nan)),
+                    'val_rmse_m_all': float(val_stats.get('rmse_m_all', nan)),
+
+                    # train_one_epoch 没算这些 -> 填 nan，方便画“只有 val 线”的曲线
+                    'train_rmse_m_mask_si': nan,
+                    'train_rmse_m_all_si': nan,
+                    'train_rmse_m_mask_viscorr': nan,
+                    'train_rmse_m_all_viscorr': nan,
+                    'train_bias_m_mask': nan,
+                    'train_bias_m_vis_med': nan,
+
+                    'val_rmse_m_mask_si': float(val_stats.get('rmse_m_mask_si', nan)),
+                    'val_rmse_m_all_si': float(val_stats.get('rmse_m_all_si', nan)),
+                    'val_rmse_m_mask_viscorr': float(val_stats.get('rmse_m_mask_viscorr', nan)),
+                    'val_rmse_m_all_viscorr': float(val_stats.get('rmse_m_all_viscorr', nan)),
+                    'val_bias_m_mask': float(val_stats.get('bias_m_mask', nan)),
+                    'val_bias_m_vis_med': float(val_stats.get('bias_m_vis_med', nan)),
+                })
+    
             # replace existing epoch row if present (safe for resume)
             history = [r for r in history if int(r.get('epoch', -1)) != epoch]
             history.append(row)
@@ -670,7 +715,12 @@ def main(args):
 
             fieldnames = ['epoch', 'lr', 'train_loss', 'val_loss']
             if args.eval_rmse:
-                fieldnames += ['train_rmse_m_mask', 'val_rmse_m_mask', 'train_rmse_m_all', 'val_rmse_m_all']
+                fieldnames += [
+                  'train_rmse_m_mask','val_rmse_m_mask','train_rmse_m_all','val_rmse_m_all',
+                  'train_rmse_m_mask_si','val_rmse_m_mask_si','train_rmse_m_all_si','val_rmse_m_all_si',
+                  'train_rmse_m_mask_viscorr','val_rmse_m_mask_viscorr','train_rmse_m_all_viscorr','val_rmse_m_all_viscorr',
+                  'train_bias_m_mask','val_bias_m_mask','train_bias_m_vis_med','val_bias_m_vis_med',
+                ]
             _save_history(history_csv, history, fieldnames)
 
             # ---- plot curves (best-effort) ----
