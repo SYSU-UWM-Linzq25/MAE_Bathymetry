@@ -100,6 +100,9 @@ class DEMTileDataset(Dataset):
         nodata: Optional[float] = None,
         random_flip: bool = False,
         return_path: bool = False,
+        tile_norm: bool = False,
+        tile_norm_eps: float = 1e-3,
+        return_meta: bool = False,
     ):
         if (not dir_path) and (not list_path):
             raise ValueError('DEMTileDataset: either dir_path or list_path must be provided')
@@ -110,6 +113,9 @@ class DEMTileDataset(Dataset):
         self.nodata = nodata
         self.random_flip = bool(random_flip)
         self.return_path = bool(return_path)
+        self.tile_norm = bool(tile_norm)
+        self.tile_norm_eps = float(tile_norm_eps)
+        self.return_meta = bool(return_meta)
 
         self.files: List[str] = []
         if self.list_path:
@@ -173,62 +179,89 @@ class DEMTileDataset(Dataset):
         denom = (vmax - vmin) if (vmax - vmin) != 0 else 1.0
         return (arr - vmin) / denom
 
-    def __getitem__(self, idx: int) -> torch.Tensor:
+    def _normalize_tile_instance(self, arr: np.ndarray):
+        """
+        Tile-wise instance normalization in meter space:
+            arr_tile = (arr - tile_mean_m) / tile_std_safe
+        """
+        tile_mean_m = float(np.mean(arr))
+        tile_std_m = float(np.std(arr))
+        tile_std_safe = max(tile_std_m, self.tile_norm_eps)
+        arr_tile = (arr - tile_mean_m) / tile_std_safe
+        return arr_tile.astype(np.float32, copy=False), tile_mean_m, tile_std_m, tile_std_safe
+
+    def __getitem__(self, idx: int):
         f = self.files[idx]
         arr = _apply_nodata(_read_dem_tiff(f), self.nodata)
 
         if np.isnan(arr).any():
             if self.norm_method == 'meanstd':
-                fill = float(self.norm_a)  # global mean
+                fill = float(self.norm_a)
             elif self.norm_method == 'minmax':
-                fill = float(self.norm_a)  # vmin
+                fill = float(self.norm_a)
             else:
                 fill = float(np.nanmean(arr)) if np.isfinite(np.nanmean(arr)) else 0.0
             arr = np.where(np.isfinite(arr), arr, fill).astype(np.float32, copy=False)
 
-        # Ensure fixed input_size (crop/pad). Most of your tiles are already input_size.
         h, w = arr.shape
         s = self.input_size
         if h != s or w != s:
-            # crop if larger
             if h >= s and w >= s:
                 if self.random_flip:
-                    # random crop for training
                     top = np.random.randint(0, h - s + 1)
                     left = np.random.randint(0, w - s + 1)
                 else:
-                    # center crop for eval
                     top = (h - s) // 2
                     left = (w - s) // 2
                 arr = arr[top:top + s, left:left + s]
             else:
-                # pad if smaller
                 m = float(np.nanmean(arr)) if np.isfinite(np.nanmean(arr)) else 0.0
                 out = np.full((s, s), m, dtype=np.float32)
                 out[:h, :w] = arr
                 arr = out
 
-        # augmentation: random flip
         if self.random_flip:
             if np.random.rand() < 0.5:
                 arr = np.flip(arr, axis=1)
             if np.random.rand() < 0.5:
                 arr = np.flip(arr, axis=0)
 
-        # np.flip creates negative strides; make contiguous for torch
-        arr = np.ascontiguousarray(arr)
+        arr = np.ascontiguousarray(arr).astype(np.float32, copy=False)
 
-        arrn = self._normalize(arr)
-        arrn = arrn.astype(np.float32, copy=False)
+        # ---- keep original meter-space tile for meta / denorm ----
+        arr_m = arr
 
-        arrn = np.ascontiguousarray(arrn)
+        # ---- model input normalization ----
+        if self.tile_norm:
+            arr_model, tile_mean_m, tile_std_m, tile_std_safe = self._normalize_tile_instance(arr_m)
+        else:
+            arr_model = self._normalize(arr_m).astype(np.float32, copy=False)
+            tile_mean_m = float(np.mean(arr_m))
+            tile_std_m = float(np.std(arr_m))
+            tile_std_safe = max(tile_std_m, self.tile_norm_eps)
 
-        # 1 channel
-        x = torch.from_numpy(arrn).unsqueeze(0)
-        if self.return_path:
+        arr_model = np.ascontiguousarray(arr_model)
+        x = torch.from_numpy(arr_model).unsqueeze(0)  # [1,H,W]
+
+        meta = {
+            "path": f,
+            "tile_mean_m": tile_mean_m,
+            "tile_std_m": tile_std_m,
+            "tile_std_safe": tile_std_safe,
+            "tile_norm": bool(self.tile_norm),
+            "global_norm_method": self.norm_method,
+            "global_norm_a": float(self.norm_a),
+            "global_norm_b": float(self.norm_b),
+        }
+
+        if self.return_meta and self.return_path:
+            return x, meta, f
+        elif self.return_meta:
+            return x, meta
+        elif self.return_path:
             return x, f
-        return x
-
+        else:
+            return x
 
 def compute_global_stats(
     files: Sequence[str],

@@ -20,14 +20,13 @@ class MaskedAutoencoderViT(nn.Module):
                  embed_dim=1024, depth=24, num_heads=16,
                  decoder_embed_dim=512, decoder_depth=8, decoder_num_heads=16,
                  mlp_ratio=4., norm_layer=nn.LayerNorm, norm_pix_loss=False,
-                 save_path="", use_instance_norm: bool = False,
+                 save_path="", 
                  bottleneck_norm: str = "none",
                  loss_mode: str = "mse"):
         super().__init__()
         # Optional: per-tile instance normalization (disabled by default).
         # This can be useful if you want each DEM tile to have zero-mean/unit-variance
         # before patch embedding, but typically you will use global normalization from the TRAIN split.
-        self.input_norm = nn.InstanceNorm2d(in_chans, affine=False, track_running_stats=False) if use_instance_norm else None
         self.loss_mode = loss_mode
         # bottleneck norm
         if bottleneck_norm in (None, "", "none"):
@@ -223,19 +222,6 @@ class MaskedAutoencoderViT(nn.Module):
             mean = target.mean(dim=-1, keepdim=True)
             var = target.var(dim=-1, keepdim=True)
             target = (target - mean) / (var + 1.e-6)**.5
-            
-        if self.loss_mode == "si_mse":
-            e = pred - target  # [N, L, P]
-
-            # mask_full: [N, L, P]
-            mask_full = mask.unsqueeze(-1).float().expand_as(e)
-            den = mask_full.sum(dim=(1, 2)).clamp_min(1.0)              # [N]
-            bias = (e * mask_full).sum(dim=(1, 2)) / den                # [N] 每个tile的系统偏移(在masked区域上)
-
-            e = e - bias[:, None, None]
-            loss = (e ** 2).mean(dim=-1)                                # [N, L]
-            loss = (loss * mask).sum() / mask.sum().clamp_min(1.0)
-            return loss
         
         # default mse (masked-only)
         loss = (pred - target) ** 2
@@ -253,9 +239,7 @@ class MaskedAutoencoderViT(nn.Module):
         return torch.cat([cls, tok], dim=1)
 
     def forward(self, imgs, mask_ratio=0.75, file_name=""):
-        # Optional per-tile InstanceNorm (apply ONCE)
-        if self.input_norm is not None:
-            imgs = self.input_norm(imgs)
+        # Apply optional bottleneck normalization on latent tokens
         latent, mask, ids_restore = self.forward_encoder(imgs, mask_ratio)
         latent = self._apply_bottleneck_norm(latent) # add instanceNorm - Linzq25 - Mar 1st 2026
         #save_path = "/home/uwm/maopuxu/MAE_Topography_Reconstruction/MAE-Topography/after_codes/latent_code"

@@ -26,6 +26,7 @@ from pathlib import Path
 from typing import Dict, Optional, List, Any
 
 import numpy as np
+import matplotlib.pyplot as plt
 import torch
 import torch.backends.cudnn as cudnn
 try:
@@ -39,8 +40,23 @@ import models_mae
 from engine_pretrain import train_one_epoch, evaluate_one_epoch
 from util.dem_dataset import DEMTileDataset, compute_dem_stats, load_json, save_json
 
-def _denorm(x: torch.Tensor, args) -> torch.Tensor:
-    # x: [H,W] or [1,H,W] normalized
+def _denorm(x: torch.Tensor, meta: dict, args) -> torch.Tensor:
+    """
+    x: [H,W] or [1,H,W] in model space
+    For tile_norm=True:
+        x_m = x * tile_std_safe + tile_mean_m
+    Fallback to old global denorm if tile_norm=False
+    """
+    if getattr(args, "tile_norm", False):
+        if isinstance(meta, dict):
+            tile_mean = meta["tile_mean_m"]
+            tile_std = meta["tile_std_safe"]
+            if torch.is_tensor(tile_mean):
+                tile_mean = tile_mean.item()
+            if torch.is_tensor(tile_std):
+                tile_std = tile_std.item()
+            return x * float(tile_std) + float(tile_mean)
+
     if args.norm_method == 'meanstd':
         return x * args.norm_std + args.norm_mean
     else:
@@ -119,13 +135,45 @@ def visualize_fixed_tiles_geotiff(model, dataset, idxs: np.ndarray, device, epoc
 
     for k, idx in enumerate(idxs.tolist()):
         sample = dataset[int(idx)]
+
         if isinstance(sample, (tuple, list)):
-            x, ref_path = sample
+            if len(sample) == 3:
+                x, meta, ref_path = sample
+            elif len(sample) == 2:
+                x, meta = sample
+                ref_path = meta["path"] if isinstance(meta, dict) and "path" in meta else dataset.files[int(idx)]
+            else:
+                x = sample[0]
+                meta = None
+                ref_path = dataset.files[int(idx)]
         else:
             x = sample
+            meta = None
             ref_path = dataset.files[int(idx)]
 
         x = x.unsqueeze(0).to(device, non_blocking=True)  # [1,1,H,W]
+
+        # fixed visualization mask per tile
+        cpu_state = torch.random.get_rng_state()
+        cuda_state = torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None
+
+        vis_seed = int(args.seed + 100000 + int(idx))
+        torch.manual_seed(vis_seed)
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed_all(vis_seed)
+
+        with torch.cuda.amp.autocast(enabled=getattr(args, "amp", True)):
+            _, pred, mask = model(x, mask_ratio=args.mask_ratio)
+
+        # restore RNG states so visualization does not affect later randomness
+        torch.random.set_rng_state(cpu_state)
+        if cuda_state is not None:
+            torch.cuda.set_rng_state_all(cuda_state)
+
+        # restore RNG states
+        torch.random.set_rng_state(cpu_state)
+        if cuda_state is not None:
+            torch.cuda.set_rng_state_all(cuda_state)
 
         with torch.cuda.amp.autocast(enabled=getattr(args, "amp", True)):
             _, pred, mask = model(x, mask_ratio=args.mask_ratio)
@@ -138,11 +186,30 @@ def visualize_fixed_tiles_geotiff(model, dataset, idxs: np.ndarray, device, epoc
         x0 = x[0, 0].float().cpu()
         recon = x0 * (1 - mask_img) + pred_img * mask_img
 
-        # denorm to meters
-        gt_m = _denorm(x0, args).cpu()
-        pred_m = _denorm(pred_img, args).cpu()
-        recon_m = _denorm(recon, args).cpu()
+        # patch-space visible median bias correction
+        target_patch = model.patchify(x)[0].float().cpu()   # [L,P]
+        pred_patch = pred[0].float().cpu()                  # [L,P]
+        mask_patch = mask[0].float().cpu()                  # [L]
+
+        keep_patch = (mask_patch == 0)
+        if keep_patch.sum() > 0:
+            vis_bias = (pred_patch[keep_patch] - target_patch[keep_patch]).reshape(-1).median()
+        else:
+            vis_bias = torch.tensor(0.0, dtype=pred_patch.dtype)
+
+        pred_patch_corr = pred_patch - vis_bias
+        pred_corr_img = model.unpatchify(pred_patch_corr.unsqueeze(0).to(device))[0, 0].float().cpu()
+        recon_corr = x0 * (1 - mask_img) + pred_corr_img * mask_img
+
+        gt_m = _denorm(x0, meta, args).cpu()
+        pred_m = _denorm(pred_img, meta, args).cpu()
+        recon_m = _denorm(recon, meta, args).cpu()
+
+        pred_corr_m = _denorm(pred_corr_img, meta, args).cpu()
+        recon_corr_m = _denorm(recon_corr, meta, args).cpu()
+
         err_m = (recon_m - gt_m).cpu()
+        err_corr_m = (recon_corr_m - gt_m).cpu()
 
         # to numpy
         gt_np = gt_m.numpy().astype(np.float32, copy=False)
@@ -150,13 +217,54 @@ def visualize_fixed_tiles_geotiff(model, dataset, idxs: np.ndarray, device, epoc
         recon_np = recon_m.numpy().astype(np.float32, copy=False)
         err_np = err_m.numpy().astype(np.float32, copy=False)
         mask_np = (mask_img.numpy() > 0.5).astype(np.uint8)
+        pred_corr_np = pred_corr_m.numpy().astype(np.float32, copy=False)
+        recon_corr_np = recon_corr_m.numpy().astype(np.float32, copy=False)
+        err_corr_np = err_corr_m.numpy().astype(np.float32, copy=False)
 
         base = f"idx{int(idx):06d}"
         _write_geotiff_like(ref_path, out_epoch / f"{base}_gt_m.tif", gt_np, dtype="float32", nodata=None)
         _write_geotiff_like(ref_path, out_epoch / f"{base}_pred_m.tif", pred_np, dtype="float32", nodata=None)
         _write_geotiff_like(ref_path, out_epoch / f"{base}_recon_m.tif", recon_np, dtype="float32", nodata=None)
         _write_geotiff_like(ref_path, out_epoch / f"{base}_err_m.tif", err_np, dtype="float32", nodata=None)
+
+        _write_geotiff_like(ref_path, out_epoch / f"{base}_pred_viscorr_m.tif", pred_corr_np, dtype="float32", nodata=None)
+        _write_geotiff_like(ref_path, out_epoch / f"{base}_recon_viscorr_m.tif", recon_corr_np, dtype="float32", nodata=None)
+        _write_geotiff_like(ref_path, out_epoch / f"{base}_err_viscorr_m.tif", err_corr_np, dtype="float32", nodata=None)
+
         _write_geotiff_like(ref_path, out_epoch / f"{base}_mask.tif", mask_np, dtype="uint8", nodata=0)
+
+        # output Histogram and scatter to help evaluation
+        # masked-only diagnostics
+        masked_vals_gt = gt_np[mask_np > 0]
+        masked_vals_recon = recon_np[mask_np > 0]
+        masked_vals_recon_corr = recon_corr_np[mask_np > 0]
+        masked_err = masked_vals_recon - masked_vals_gt
+        masked_err_corr = masked_vals_recon_corr - masked_vals_gt
+
+        # histogram
+        plt.figure(figsize=(5, 4))
+        plt.hist(masked_err, bins=60, alpha=0.6, label='raw')
+        plt.hist(masked_err_corr, bins=60, alpha=0.6, label='viscorr')
+        plt.xlabel('Error (m)')
+        plt.ylabel('Count')
+        plt.legend()
+        plt.tight_layout()
+        plt.savefig(out_epoch / f"{base}_err_hist.png", dpi=150)
+        plt.close()
+
+        # scatter
+        plt.figure(figsize=(5, 5))
+        plt.scatter(masked_vals_gt, masked_vals_recon, s=2, alpha=0.3, label='raw')
+        plt.scatter(masked_vals_gt, masked_vals_recon_corr, s=2, alpha=0.3, label='viscorr')
+        vmin = float(np.min(masked_vals_gt))
+        vmax = float(np.max(masked_vals_gt))
+        plt.plot([vmin, vmax], [vmin, vmax], '--')
+        plt.xlabel('GT (m)')
+        plt.ylabel('Recon (m)')
+        plt.legend()
+        plt.tight_layout()
+        plt.savefig(out_epoch / f"{base}_gt_vs_recon_scatter.png", dpi=150)
+        plt.close()
 
 def get_args_parser():
     parser = argparse.ArgumentParser('MAE pre-training (DEM GeoTIFF)', add_help=False)
@@ -197,10 +305,13 @@ def get_args_parser():
                         help='Masking ratio (percentage of removed patches).')
     parser.add_argument('--norm_pix_loss', action='store_true',
                         help='Normalize target patches per-sample (original MAE). For DEM, usually keep False.')
-    parser.add_argument('--use_instance_norm', action='store_true', help='Apply InstanceNorm2d on input (per-tile). Usually OFF if you already use global normalization.')
-
+    parser.add_argument('--tile_norm', action='store_true',
+                        help='Apply tile-wise mean/std normalization in dataset preprocessing.')
+    parser.add_argument('--tile_norm_eps', default=1e-3, type=float,
+                        help='Minimum std used in tile-wise normalization.')
+                    
     parser.add_argument('--bottleneck_norm', default='none', choices=['none', 'inst1d'])
-    parser.add_argument('--loss_mode', default='mse', choices=['mse', 'si_mse'])
+    parser.add_argument('--loss_mode', default='mse', choices=['mse'])
 
     # --- training ---
     parser.add_argument('--batch_size', default=64, type=int)
@@ -244,9 +355,8 @@ def get_args_parser():
                         choices=[
                           'val_loss',
                           'val_rmse_m_mask', 'val_rmse_m_all',
-                          'val_rmse_m_mask_si', 'val_rmse_m_all_si',
                           'val_rmse_m_mask_viscorr', 'val_rmse_m_all_viscorr',
-                          'val_bias_m_mask', 'val_bias_m_vis_med',
+                          'val_bias_m_vis_med',
                         ],
                         help='Metric to monitor for early stopping.')
     parser.add_argument('--early_stop_min_delta', default=0.0, type=float,
@@ -263,9 +373,8 @@ def get_args_parser():
                           '',
                           'val_loss',
                           'val_rmse_m_mask', 'val_rmse_m_all',
-                          'val_rmse_m_mask_si', 'val_rmse_m_all_si',
                           'val_rmse_m_mask_viscorr', 'val_rmse_m_all_viscorr',
-                          'val_bias_m_mask', 'val_bias_m_vis_med',
+                          'val_bias_m_vis_med',
                         ],
                         help=('Metric used to save checkpoint-best.pth. '
                               'If empty: use val_rmse_m_mask when --eval_rmse, else val_loss.'))
@@ -380,13 +489,9 @@ def _maybe_plot_curves(history: List[Dict[str, float]], out_dir: Path, plot_rmse
         _plot_one('train_rmse_m_mask', 'val_rmse_m_mask', 'RMSE (m) on masked patches', 'curve_rmse_mask.png')
         _plot_one('train_rmse_m_all', 'val_rmse_m_all', 'RMSE (m) on pasted full tile', 'curve_rmse_all.png')
 
-        _plot_one('train_rmse_m_mask_si', 'val_rmse_m_mask_si', 'RMSE (m) masked (shift-invariant)', 'curve_rmse_mask_si.png')
-        _plot_one('train_rmse_m_all_si',  'val_rmse_m_all_si',  'RMSE (m) all (shift-invariant)',    'curve_rmse_all_si.png')
-
         _plot_one('train_rmse_m_mask_viscorr', 'val_rmse_m_mask_viscorr', 'RMSE (m) masked (visible bias-corr)', 'curve_rmse_mask_viscorr.png')
         _plot_one('train_rmse_m_all_viscorr',  'val_rmse_m_all_viscorr',  'RMSE (m) all (visible bias-corr)',    'curve_rmse_all_viscorr.png')
 
-        _plot_one('train_bias_m_mask',    'val_bias_m_mask',    'Bias (m) estimated on masked',   'curve_bias_mask.png')
         _plot_one('train_bias_m_vis_med', 'val_bias_m_vis_med', 'Bias (m) visible-median',        'curve_bias_vis_med.png')
 
 def main(args):
@@ -410,38 +515,52 @@ def main(args):
     test_dir = _resolve_split_dir(args.data_root, 'test', args.test_dir)
 
     train_ds = DEMTileDataset(
-        dir_path=train_dir if not args.train_list else None,
-        list_path=args.train_list if args.train_list else None,
+        dir_path=train_dir if not args.train_list else '',
+        list_path=args.train_list if args.train_list else '',
         input_size=args.input_size,
         nodata=args.nodata,
         random_flip=True,
         return_path=False,
+        tile_norm=args.tile_norm,
+        tile_norm_eps=args.tile_norm_eps,
+        return_meta=True,
     )
+
     val_ds = DEMTileDataset(
-        dir_path=val_dir if not args.val_list else None,
-        list_path=args.val_list if args.val_list else None,
+        dir_path=val_dir if not args.val_list else '',
+        list_path=args.val_list if args.val_list else '',
         input_size=args.input_size,
         nodata=args.nodata,
         random_flip=False,
         return_path=False,
+        tile_norm=args.tile_norm,
+        tile_norm_eps=args.tile_norm_eps,
+        return_meta=True,
     )
 
     # ---- visualization datasets (NO random flip; can return file path) ----
     train_vis_ds = DEMTileDataset(
-        dir_path=train_dir if not args.train_list else None,
-        list_path=args.train_list if args.train_list else None,
+        dir_path=train_dir if not args.train_list else '',
+        list_path=args.train_list if args.train_list else '',
         input_size=args.input_size,
         nodata=args.nodata,
         random_flip=False,
         return_path=True,
+        tile_norm=args.tile_norm,
+        tile_norm_eps=args.tile_norm_eps,
+        return_meta=True,
     )
+
     val_vis_ds = DEMTileDataset(
-        dir_path=val_dir if not args.val_list else None,
-        list_path=args.val_list if args.val_list else None,
+        dir_path=val_dir if not args.val_list else '',
+        list_path=args.val_list if args.val_list else '',
         input_size=args.input_size,
         nodata=args.nodata,
         random_flip=False,
         return_path=True,
+        tile_norm=args.tile_norm,
+        tile_norm_eps=args.tile_norm_eps,
+        return_meta=True,
     )
 
     # ---- compute / load global normalization (TRAIN only) ----
@@ -551,7 +670,6 @@ def main(args):
         norm_pix_loss=args.norm_pix_loss,
         img_size=args.input_size,
         in_chans=args.in_chans,
-        use_instance_norm=args.use_instance_norm,
         bottleneck_norm=args.bottleneck_norm,
         loss_mode=args.loss_mode,
     )
@@ -608,7 +726,7 @@ def main(args):
     # select best checkpoint metric
     best_metric_name = args.best_metric
     if best_metric_name == '':
-        best_metric_name = 'val_rmse_m_mask' if args.eval_rmse else 'val_loss'
+        best_metric_name = 'val_rmse_m_mask_viscorr' if args.eval_rmse else 'val_loss'
 
     best_val = float('inf')  # best value for best_metric_name
     best_epoch = -1
@@ -693,18 +811,12 @@ def main(args):
                     'val_rmse_m_all': float(val_stats.get('rmse_m_all', nan)),
 
                     # train_one_epoch 没算这些 -> 填 nan，方便画“只有 val 线”的曲线
-                    'train_rmse_m_mask_si': nan,
-                    'train_rmse_m_all_si': nan,
                     'train_rmse_m_mask_viscorr': nan,
                     'train_rmse_m_all_viscorr': nan,
-                    'train_bias_m_mask': nan,
                     'train_bias_m_vis_med': nan,
 
-                    'val_rmse_m_mask_si': float(val_stats.get('rmse_m_mask_si', nan)),
-                    'val_rmse_m_all_si': float(val_stats.get('rmse_m_all_si', nan)),
                     'val_rmse_m_mask_viscorr': float(val_stats.get('rmse_m_mask_viscorr', nan)),
                     'val_rmse_m_all_viscorr': float(val_stats.get('rmse_m_all_viscorr', nan)),
-                    'val_bias_m_mask': float(val_stats.get('bias_m_mask', nan)),
                     'val_bias_m_vis_med': float(val_stats.get('bias_m_vis_med', nan)),
                 })
     
@@ -717,9 +829,8 @@ def main(args):
             if args.eval_rmse:
                 fieldnames += [
                   'train_rmse_m_mask','val_rmse_m_mask','train_rmse_m_all','val_rmse_m_all',
-                  'train_rmse_m_mask_si','val_rmse_m_mask_si','train_rmse_m_all_si','val_rmse_m_all_si',
                   'train_rmse_m_mask_viscorr','val_rmse_m_mask_viscorr','train_rmse_m_all_viscorr','val_rmse_m_all_viscorr',
-                  'train_bias_m_mask','val_bias_m_mask','train_bias_m_vis_med','val_bias_m_vis_med',
+                  'train_bias_m_vis_med','val_bias_m_vis_med',
                 ]
             _save_history(history_csv, history, fieldnames)
 
@@ -780,13 +891,18 @@ def main(args):
     # ---- final evaluations (optional) ----
     def _maybe_eval(split_name: str, dir_path: str, list_path: str, out_tag: str):
         if not dir_path and not list_path:
-            return
-        ds = DEMTileDataset(dir_path=dir_path if dir_path else None,
-                            list_path=list_path if list_path else None,
-                            input_size=args.input_size,
-                            nodata=args.nodata,
-                            random_flip=False,
-                            return_path=False)
+            return                
+        ds = DEMTileDataset(
+            dir_path=dir_path if dir_path else None,
+            list_path=list_path if list_path else None,
+            input_size=args.input_size,
+            nodata=args.nodata,
+            random_flip=False,
+            return_path=False,
+            tile_norm=args.tile_norm,
+            tile_norm_eps=args.tile_norm_eps,
+            return_meta=True,
+        )
         # apply same TRAIN normalization
         if args.norm_method == 'meanstd':
             ds.set_norm(args.norm_mean, args.norm_std)

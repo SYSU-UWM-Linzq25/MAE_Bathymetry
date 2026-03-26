@@ -27,122 +27,149 @@ def _unwrap_samples(batch):
         return batch[0]
     return batch
 
+def _unwrap_batch(batch):
+    """
+    Support:
+      - x
+      - (x, path)
+      - (x, meta)
+      - (x, meta, path)
+    """
+    samples = None
+    meta = None
+    path = None
+
+    if isinstance(batch, dict):
+        samples = batch["image"]
+        meta = batch.get("meta", None)
+        path = batch.get("path", None)
+        return samples, meta, path
+
+    if not isinstance(batch, (tuple, list)):
+        return batch, None, None
+
+    if len(batch) == 1:
+        return batch[0], None, None
+    if len(batch) == 2:
+        # heuristic: second is meta dict or path list
+        if isinstance(batch[1], dict):
+            return batch[0], batch[1], None
+        return batch[0], None, batch[1]
+    if len(batch) >= 3:
+        return batch[0], batch[1], batch[2]
+
+    return batch[0], None, None
+
+def _meta_to_tile_std_tensor(meta, device, dtype=torch.float32):
+    """
+    meta can be:
+      - dict of batched tensors/lists from default collate
+    """
+    if meta is None:
+        return None
+
+    if isinstance(meta, dict):
+        vals = meta["tile_std_safe"]
+        if torch.is_tensor(vals):
+            return vals.to(device=device, dtype=dtype)
+        return torch.as_tensor(vals, device=device, dtype=dtype)
+
+    raise TypeError(f"Unsupported meta type: {type(meta)}")
+
+def _meta_to_tile_mean_tensor(meta, device, dtype=torch.float32):
+    if meta is None:
+        return None
+    if isinstance(meta, dict):
+        vals = meta["tile_mean_m"]
+        if torch.is_tensor(vals):
+            return vals.to(device=device, dtype=dtype)
+        return torch.as_tensor(vals, device=device, dtype=dtype)
+    raise TypeError(f"Unsupported meta type: {type(meta)}")
 
 @torch.no_grad()
-def _rmse_meters_from_pred(model, samples, pred, mask, norm_scale_m: float) -> Tuple[torch.Tensor, torch.Tensor]:
-    """Compute RMSE in meters (masked-only and all-pixels) from MAE outputs.
-
-    Assumes `samples` are globally normalized.
-
-    - mean/std:  x_norm = (x - mean) / std       => RMSE_m = RMSE_norm * std
-    - min/max:   x_norm = (x - min) / (max-min) => RMSE_m = RMSE_norm * (max-min)
-
-    Important:
-      `pred` is produced under autocast and can be float16/bfloat16.
-      `target` from patchify(samples) is usually float32.
-      We compute RMSE in float32 to avoid dtype mismatch and improve numerical stability.
-    """
+def _rmse_meters_from_pred(model, samples, pred, mask, meta=None, norm_scale_m: float = 1.0):
     target = model.patchify(samples)  # [N, L, P]
 
-    # Compute metrics in float32 (safe + stable)
     pred_f = pred.float()
     target_f = target.float()
 
-    # paste keep patches from target into pred
-    # mask: 0 keep, 1 remove
     keep = (mask == 0)
     pred_paste = pred_f.clone()
     pred_paste[keep] = target_f[keep]
 
-    mse = (pred_paste - target_f) ** 2
-    mse = mse.mean(dim=-1)  # [N, L] mean over patch pixels
+    # error in normalized/model space
+    err = pred_paste - target_f  # [N,L,P]
 
+    if meta is None:
+        # fallback to old global-scale logic
+        mse = (err ** 2).mean(dim=-1)
+        mask_f = mask.float()
+        mask_sum = mask_f.sum().clamp(min=1.0)
+        rmse_mask = torch.sqrt((mse * mask_f).sum() / mask_sum)
+        rmse_all = torch.sqrt(mse.mean())
+        scale = torch.as_tensor(float(norm_scale_m), device=samples.device, dtype=rmse_mask.dtype)
+        return rmse_mask * scale, rmse_all * scale
+
+    # tile-wise meter conversion
+    tile_std = _meta_to_tile_std_tensor(meta, device=samples.device, dtype=err.dtype)  # [N]
+    err_m = err * tile_std[:, None, None]  # [N,L,P]
+
+    mse_m = (err_m ** 2).mean(dim=-1)  # [N,L]
     mask_f = mask.float()
-    mask_sum = mask_f.sum().clamp(min=1.0)
 
-    rmse_mask = torch.sqrt((mse * mask_f).sum() / mask_sum)
-    rmse_all = torch.sqrt(mse.mean())
+    rmse_mask = torch.sqrt((mse_m * mask_f).sum() / mask_f.sum().clamp(min=1.0))
+    rmse_all = torch.sqrt(mse_m.mean())
 
-    scale = torch.as_tensor(float(norm_scale_m), device=samples.device, dtype=rmse_mask.dtype)
-    return rmse_mask * scale, rmse_all * scale
+    return rmse_mask, rmse_all
 
 @torch.no_grad()
-def _rmse_meters_shift_invariant_from_pred(model, samples, pred, mask, norm_scale_m: float):
-    target = model.patchify(samples)  # [N, L, P]
+def _rmse_meters_visible_median_bias_from_pred(model, samples, pred, mask, meta=None, norm_scale_m: float = 1.0):
+    target = model.patchify(samples)
     pred_f = pred.float()
     target_f = target.float()
 
-    e = pred_f - target_f  # [N,L,P]
-    mask_full = mask.unsqueeze(-1).float().expand_as(e)
-    den = mask_full.sum(dim=(1, 2)).clamp_min(1.0)
-    bias = (e * mask_full).sum(dim=(1, 2)) / den  # [N] (normalized)
+    keep_patch = (mask == 0)
+    e = pred_f - target_f  # normalized/model space
 
-    # bias-correct on masked predictions only
-    keep = (mask == 0)
-    pred_paste = pred_f.clone()
-    pred_paste[keep] = target_f[keep]
-
-    pred_corr = pred_paste - bias[:, None, None]
-    pred_corr[keep] = target_f[keep]  # keep 区域仍然用真值（pasted）
-
-    mse = (pred_corr - target_f) ** 2
-    mse = mse.mean(dim=-1)  # [N,L]
-
-    mask_f = mask.float()
-    mask_sum = mask_f.sum().clamp(min=1.0)
-
-    rmse_mask = torch.sqrt((mse * mask_f).sum() / mask_sum)
-    rmse_all = torch.sqrt(mse.mean())
-
-    scale = torch.as_tensor(float(norm_scale_m), device=samples.device, dtype=rmse_mask.dtype)
-    bias_m = bias.mean() * scale  # 这里给一个“batch平均bias(m)”，也可以改成abs/median
-    return rmse_mask * scale, rmse_all * scale, bias_m
-
-@torch.no_grad()
-def _rmse_meters_visible_median_bias_from_pred(model, samples, pred, mask, norm_scale_m: float):
-    """Deployment-style bias correction using ONLY visible (keep) region.
-
-    We estimate a per-tile bias from KEEP patches by comparing raw pred_keep vs target_keep,
-    then apply this bias correction before pasting keep patches from target.
-    Median is used for robustness.
-    """
-    target = model.patchify(samples)  # [N, L, P]
-    pred_f = pred.float()
-    target_f = target.float()
-
-    keep_patch = (mask == 0)  # [N, L]
-    e = pred_f - target_f     # [N, L, P]
-
-    # robust per-tile bias from KEEP region (median over keep patches and pixels)
     bias_list = []
     for i in range(e.shape[0]):
-        ei = e[i]                         # [L, P]
-        ki = keep_patch[i]                # [L]
+        ei = e[i]
+        ki = keep_patch[i]
         if ki.sum() == 0:
             bias_list.append(torch.zeros((), device=e.device, dtype=e.dtype))
         else:
-            vals = ei[ki].reshape(-1)     # [L_keep*P]
+            vals = ei[ki].reshape(-1)
             bias_list.append(vals.median())
-    bias = torch.stack(bias_list, dim=0)  # [N] (normalized)
+    bias = torch.stack(bias_list, dim=0)  # [N]
 
-    # Apply bias correction then paste keep patches from target (deployment mimic)
     pred_corr = pred_f - bias[:, None, None]
     pred_paste = pred_corr.clone()
     pred_paste[keep_patch] = target_f[keep_patch]
 
-    mse = (pred_paste - target_f) ** 2
-    mse = mse.mean(dim=-1)  # [N, L]
+    err = pred_paste - target_f  # normalized/model space
 
+    if meta is None:
+        mse = (err ** 2).mean(dim=-1)
+        mask_f = mask.float()
+        rmse_mask = torch.sqrt((mse * mask_f).sum() / mask_f.sum().clamp(min=1.0))
+        rmse_all = torch.sqrt(mse.mean())
+        scale = torch.as_tensor(float(norm_scale_m), device=samples.device, dtype=rmse_mask.dtype)
+        bias_m_vis_med = bias.mean() * scale
+        return rmse_mask * scale, rmse_all * scale, bias_m_vis_med
+
+    tile_std = _meta_to_tile_std_tensor(meta, device=samples.device, dtype=err.dtype)
+    err_m = err * tile_std[:, None, None]
+    bias_m = bias * tile_std  # [N]
+
+    mse_m = (err_m ** 2).mean(dim=-1)
     mask_f = mask.float()
-    mask_sum = mask_f.sum().clamp(min=1.0)
 
-    rmse_mask = torch.sqrt((mse * mask_f).sum() / mask_sum)
-    rmse_all = torch.sqrt(mse.mean())
+    rmse_mask = torch.sqrt((mse_m * mask_f).sum() / mask_f.sum().clamp(min=1.0))
+    rmse_all = torch.sqrt(mse_m.mean())
+    bias_m_vis_med = bias_m.mean()
 
-    scale = torch.as_tensor(float(norm_scale_m), device=samples.device, dtype=rmse_mask.dtype)
-    bias_m_vis_med = bias.mean() * scale
-    return rmse_mask * scale, rmse_all * scale, bias_m_vis_med
-
+    return rmse_mask, rmse_all, bias_m_vis_med
+    
 def train_one_epoch(
     model: torch.nn.Module,
     data_loader: Iterable,
@@ -167,7 +194,7 @@ def train_one_epoch(
         print('log_dir:', log_writer.log_dir)
 
     for data_iter_step, batch in enumerate(metric_logger.log_every(data_loader, print_freq, header)):
-        samples = _unwrap_samples(batch)
+        samples, meta, _ = _unwrap_batch(batch)
         samples = samples.to(device, non_blocking=True)
 
         # per-iteration lr schedule
@@ -203,8 +230,11 @@ def train_one_epoch(
 
         if args is not None and getattr(args, "log_rmse", False):
             rmse_mask_m, rmse_all_m = _rmse_meters_from_pred(
-                model, samples, pred, mask, norm_scale_m=getattr(args, "norm_scale_m", 1.0)
+                model, samples, pred, mask,
+                meta=meta,
+                norm_scale_m=getattr(args, "norm_scale_m", 1.0)
             )
+            
             metric_logger.update(rmse_m_mask=float(rmse_mask_m.item()))
             metric_logger.update(rmse_m_all=float(rmse_all_m.item()))
 
@@ -239,9 +269,9 @@ def evaluate_one_epoch(
     print_freq = 50
 
     for data_iter_step, batch in enumerate(metric_logger.log_every(data_loader, print_freq, header)):
-        samples = _unwrap_samples(batch)
+        samples, meta, _ = _unwrap_batch(batch)
         samples = samples.to(device, non_blocking=True)
-
+        
         with torch.cuda.amp.autocast(enabled=getattr(args, "amp", True)):
             loss, pred, mask = model(samples, mask_ratio=args.mask_ratio)
 
@@ -250,26 +280,24 @@ def evaluate_one_epoch(
 
         if args is not None and getattr(args, "log_rmse", False):
             rmse_mask_m, rmse_all_m = _rmse_meters_from_pred(
-                model, samples, pred, mask, norm_scale_m=getattr(args, "norm_scale_m", 1.0)
+                model, samples, pred, mask,
+                meta=meta,
+                norm_scale_m=getattr(args, "norm_scale_m", 1.0)
             )
+            
             metric_logger.update(rmse_m_mask=float(rmse_mask_m.item()))
             metric_logger.update(rmse_m_all=float(rmse_all_m.item()))
             
-            # 新增：shift-invariant
-            rmse_mask_si_m, rmse_all_si_m, bias_m = _rmse_meters_shift_invariant_from_pred(
-                model, samples, pred, mask, norm_scale_m=getattr(args, "norm_scale_m", 1.0)
-            )
-            metric_logger.update(rmse_m_mask_si=float(rmse_mask_si_m.item()))
-            metric_logger.update(rmse_m_all_si=float(rmse_all_si_m.item()))
-            metric_logger.update(bias_m_mask=float(bias_m.item()))
-            
             # New: visible-median bias correction (deployment-style)
-            rmse_mask_vis_m, rmse_all_vis_m, bias_vis_m_med = _rmse_meters_visible_median_bias_from_pred(
-                model, samples, pred, mask, norm_scale_m=getattr(args, "norm_scale_m", 1.0)
+            rmse_mask_vis_m, rmse_all_vis_m, bias_vis_m = _rmse_meters_visible_median_bias_from_pred(
+                model, samples, pred, mask,
+                meta=meta,
+                norm_scale_m=getattr(args, "norm_scale_m", 1.0)
             )
+            
             metric_logger.update(rmse_m_mask_viscorr=float(rmse_mask_vis_m.item()))
             metric_logger.update(rmse_m_all_viscorr=float(rmse_all_vis_m.item()))
-            metric_logger.update(bias_m_vis_med=float(bias_vis_m_med.item()))
+            metric_logger.update(bias_m_vis_med=float(bias_vis_m.item()))
             
     metric_logger.synchronize_between_processes()
 
@@ -280,9 +308,6 @@ def evaluate_one_epoch(
         if args is not None and getattr(args, "log_rmse", False):
             log_writer.add_scalar(f'{prefix}_rmse_m_mask', stats.get('rmse_m_mask', float('nan')), epoch)
             log_writer.add_scalar(f'{prefix}_rmse_m_all', stats.get('rmse_m_all', float('nan')), epoch)
-            log_writer.add_scalar(f'{prefix}_bias_m_mask', stats.get('bias_m_mask', float('nan')), epoch)
-            log_writer.add_scalar(f'{prefix}_rmse_m_mask_si', stats.get('rmse_m_mask_si', float('nan')), epoch)
-            log_writer.add_scalar(f'{prefix}_rmse_m_all_si',  stats.get('rmse_m_all_si',  float('nan')), epoch)
             log_writer.add_scalar(f'{prefix}_rmse_m_mask_viscorr', stats.get('rmse_m_mask_viscorr', float('nan')), epoch)
             log_writer.add_scalar(f'{prefix}_rmse_m_all_viscorr',  stats.get('rmse_m_all_viscorr',  float('nan')), epoch)
             log_writer.add_scalar(f'{prefix}_bias_m_vis_med',      stats.get('bias_m_vis_med',      float('nan')), epoch)
