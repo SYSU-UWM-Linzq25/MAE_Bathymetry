@@ -64,7 +64,6 @@ def _meta_to_tile_std_tensor(meta, device, dtype=torch.float32):
     raise TypeError(f"Unsupported meta type: {type(meta)}")
 
 @torch.no_grad()
-@torch.no_grad()
 def rmse_meters_per_sample(model, samples, pred, mask, meta):
     """
     Per-sample metrics using tile-wise normalization metadata.
@@ -193,6 +192,87 @@ def load_ckpt(model, ckpt_path: str):
     missing, unexpected = model.load_state_dict(state, strict=False)
     return missing, unexpected
 
+def quantile_map_from_visible(pred_patch, target_patch, mask, n_q=101):
+    """
+    pred_patch, target_patch: [L, P]
+    mask: [L], 0=keep/visible, 1=masked
+    returns corrected pred_patch in the same space
+    """
+    keep = (mask == 0)
+    if keep.sum() == 0:
+        return pred_patch
+
+    pred_vis = pred_patch[keep].reshape(-1).detach().cpu().numpy()
+    gt_vis   = target_patch[keep].reshape(-1).detach().cpu().numpy()
+
+    if pred_vis.size < 16:
+        return pred_patch
+
+    q = np.linspace(0.0, 1.0, n_q)
+    pred_q = np.quantile(pred_vis, q)
+    gt_q   = np.quantile(gt_vis, q)
+
+    # make pred_q strictly increasing for np.interp stability
+    pred_q = np.maximum.accumulate(pred_q)
+
+    pred_all = pred_patch.detach().cpu().numpy().reshape(-1)
+    pred_corr = np.interp(pred_all, pred_q, gt_q, left=gt_q[0], right=gt_q[-1])
+
+    pred_corr = torch.from_numpy(pred_corr).to(pred_patch.device, dtype=pred_patch.dtype)
+    return pred_corr.view_as(pred_patch)
+
+@torch.no_grad()
+def _rmse_meters_postproc_from_pred(model, samples, pred, mask, meta, mode="none"):
+    target = model.patchify(samples)   # [N, L, P]
+    pred_f = pred.float()
+    target_f = target.float()
+
+    keep_patch = (mask == 0)
+
+    pred_corr = pred_f.clone()
+
+    if mode == "median":
+        bias_list = []
+        for i in range(pred_f.shape[0]):
+            ei = pred_f[i] - target_f[i]
+            ki = keep_patch[i]
+            if ki.sum() == 0:
+                bias_list.append(torch.zeros((), device=pred_f.device, dtype=pred_f.dtype))
+            else:
+                bias_list.append(ei[ki].reshape(-1).median())
+        bias = torch.stack(bias_list, dim=0)
+        pred_corr = pred_f - bias[:, None, None]
+        bias_m = bias * _meta_to_tile_std_tensor(meta, device=samples.device, dtype=pred_f.dtype).view(-1)
+
+    elif mode == "histogram":
+        bias_vals = []
+        pred_corr_list = []
+        for i in range(pred_f.shape[0]):
+            pc = quantile_map_from_visible(pred_f[i], target_f[i], mask[i])
+            pred_corr_list.append(pc)
+            # histogram 不是单值 bias，这里可以放 NaN 占位
+            bias_vals.append(torch.tensor(float("nan"), device=pred_f.device, dtype=pred_f.dtype))
+        pred_corr = torch.stack(pred_corr_list, dim=0)
+        bias_m = torch.stack(bias_vals, dim=0)
+
+    else:
+        bias_m = torch.full((pred_f.shape[0],), float("nan"), device=pred_f.device, dtype=pred_f.dtype)
+
+    pred_paste = pred_corr.clone()
+    pred_paste[keep_patch] = target_f[keep_patch]
+
+    err = pred_paste - target_f
+    tile_std = _meta_to_tile_std_tensor(meta, device=samples.device, dtype=err.dtype).view(-1)
+    err_m = err * tile_std[:, None, None]
+
+    mse_patch_m = (err_m ** 2).mean(dim=-1)
+    mask_f = mask.float()
+    denom = mask_f.sum(dim=1).clamp(min=1.0)
+
+    rmse_m_mask_ps = torch.sqrt((mse_patch_m * mask_f).sum(dim=1) / denom)
+    rmse_m_all_ps = torch.sqrt(mse_patch_m.mean(dim=1))
+
+    return rmse_m_mask_ps, rmse_m_all_ps, bias_m
 
 def main():
     ap = argparse.ArgumentParser()
@@ -216,6 +296,7 @@ def main():
     ap.add_argument("--tile_norm_eps", type=float, default=1e-3)
     ap.add_argument("--bottleneck_norm", default="none", choices=["none", "inst1d"])
     ap.add_argument("--loss_mode", default="mse", choices=["mse"])
+    ap.add_argument("--postproc", default="none", choices=["none", "median", "histogram"])
     args = ap.parse_args()
 
     out_dir = Path(args.output_dir)
@@ -291,9 +372,18 @@ def main():
             model, x, pred, mask, meta=meta
         )
 
-        rmse_m_mask_viscorr_ps, rmse_m_all_viscorr_ps, bias_m_vis_med_ps = _rmse_meters_visible_median_bias_from_pred(
-            model, x, pred, mask, meta=meta
-        )
+        if args.postproc == "none":
+            rmse_m_mask_post_ps = rmse_m_mask
+            rmse_m_all_post_ps = rmse_m_all
+            bias_post_ps = torch.full_like(rmse_m_mask, float("nan"))
+        elif args.postproc == "median":
+            rmse_m_mask_post_ps, rmse_m_all_post_ps, bias_post_ps = _rmse_meters_postproc_from_pred(
+                model, x, pred, mask, meta=meta, mode="median"
+            )
+        elif args.postproc == "histogram":
+            rmse_m_mask_post_ps, rmse_m_all_post_ps, bias_post_ps = _rmse_meters_postproc_from_pred(
+                model, x, pred, mask, meta=meta, mode="histogram"
+            )
 
         for i in range(x.shape[0]):
             p = paths[i]
@@ -301,9 +391,9 @@ def main():
             rma = float(rmse_m_all[i].item())
             rmse_mask_list.append(rmm)
             rmse_all_list.append(rma)
-            rmm_vc = float(rmse_m_mask_viscorr_ps[i].item())
-            rma_vc = float(rmse_m_all_viscorr_ps[i].item())
-            bvm = float(bias_m_vis_med_ps[i].item())
+            rmm_vc = float(rmse_m_mask_post_ps[i].item())
+            rma_vc = float(rmse_m_all_post_ps[i].item())
+            bvm = float(bias_post_ps[i].item())
 
             rmse_mask_viscorr_list.append(rmm_vc)
             rmse_all_viscorr_list.append(rma_vc)
@@ -379,6 +469,9 @@ def main():
                     "path": r["path"],
                     "rmse_m_mask": r["rmse_m_mask"],
                     "rmse_m_all": r["rmse_m_all"],
+                    "rmse_m_mask_viscorr": r["rmse_m_mask_viscorr"],
+                    "rmse_m_all_viscorr": r["rmse_m_all_viscorr"],
+                    "bias_m_vis_med": r["bias_m_vis_med"],
                     "mse_norm_mask": r["mse_norm_mask"],
                 })
 

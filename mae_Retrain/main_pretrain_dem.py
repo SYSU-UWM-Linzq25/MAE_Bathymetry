@@ -170,14 +170,6 @@ def visualize_fixed_tiles_geotiff(model, dataset, idxs: np.ndarray, device, epoc
         if cuda_state is not None:
             torch.cuda.set_rng_state_all(cuda_state)
 
-        # restore RNG states
-        torch.random.set_rng_state(cpu_state)
-        if cuda_state is not None:
-            torch.cuda.set_rng_state_all(cuda_state)
-
-        with torch.cuda.amp.autocast(enabled=getattr(args, "amp", True)):
-            _, pred, mask = model(x, mask_ratio=args.mask_ratio)
-
         # images (normalized space)
         pred_img = model.unpatchify(pred)[0, 0].float().cpu()  # [H,W]
         p = model.patch_embed.patch_size[0]
@@ -394,6 +386,14 @@ def get_args_parser():
     parser.add_argument('--dist_on_itp', action='store_true')
     parser.add_argument('--dist_url', default='env://', help='url used to set up distributed training')
 
+    # decorder trainning
+    parser.add_argument('--init_ckpt', default='',
+                    help='load pretrained upstream checkpoint weights only (do not resume optimizer)')
+    parser.add_argument('--freeze_encoder', action='store_true',
+                        help='freeze encoder and train decoder only')
+    parser.add_argument('--freeze_last_n_encoder_blocks', default=0, type=int,
+                        help='optional: keep last N encoder blocks trainable (0 means fully freeze encoder)')
+
     return parser
 
 
@@ -493,6 +493,51 @@ def _maybe_plot_curves(history: List[Dict[str, float]], out_dir: Path, plot_rmse
         _plot_one('train_rmse_m_all_viscorr',  'val_rmse_m_all_viscorr',  'RMSE (m) all (visible bias-corr)',    'curve_rmse_all_viscorr.png')
 
         _plot_one('train_bias_m_vis_med', 'val_bias_m_vis_med', 'Bias (m) visible-median',        'curve_bias_vis_med.png')
+
+def freeze_for_decoder_adaptation(model, last_n_blocks: int = 0):
+    """
+    Freeze encoder for downstream decoder adaptation.
+    If last_n_blocks > 0, keep the last N encoder blocks trainable.
+    """
+    # freeze patch embedding
+    for p in model.patch_embed.parameters():
+        p.requires_grad = False
+
+    # freeze cls token / pos embed
+    model.cls_token.requires_grad = False
+    model.pos_embed.requires_grad = False
+
+    # freeze all encoder blocks first
+    for blk in model.blocks:
+        for p in blk.parameters():
+            p.requires_grad = False
+
+    # optionally unfreeze last N encoder blocks
+    if last_n_blocks > 0:
+        for blk in model.blocks[-last_n_blocks:]:
+            for p in blk.parameters():
+                p.requires_grad = True
+
+    # freeze encoder norm
+    for p in model.norm.parameters():
+        p.requires_grad = False
+
+    # bottleneck norm belongs to encoder side
+    if getattr(model, "bottleneck_norm", None) is not None:
+        for p in model.bottleneck_norm.parameters():
+            p.requires_grad = False
+
+    # decoder stays trainable:
+    # decoder_embed, mask_token, decoder_pos_embed, decoder_blocks, decoder_norm, decoder_pred
+
+    # print summary
+    total, trainable = 0, 0
+    for _, p in model.named_parameters():
+        n = p.numel()
+        total += n
+        if p.requires_grad:
+            trainable += n
+    print(f"[FREEZE] total params={total:,}, trainable params={trainable:,}")
 
 def main(args):
     misc.init_distributed_mode(args)
@@ -690,8 +735,40 @@ def main(args):
         print(f"actual_lr: {args.lr:.2e}")
         print(f"effective_batch_size: {eff_batch_size}")
 
+    # ---- init from upstream checkpoint (weights only) ----
+    if args.init_ckpt:
+        checkpoint = torch.load(args.init_ckpt, map_location='cpu')
+        state_dict = checkpoint['model'] if 'model' in checkpoint else checkpoint
+        msg = model_without_ddp.load_state_dict(state_dict, strict=False)
+        print(f"[INIT_CKPT] loaded from {args.init_ckpt}")
+        print(f"[INIT_CKPT] missing_keys={msg.missing_keys}")
+        print(f"[INIT_CKPT] unexpected_keys={msg.unexpected_keys}")
+
+    # ---- freeze encoder for downstream decoder adaptation ----
+    if args.freeze_encoder:
+        freeze_for_decoder_adaptation(
+            model_without_ddp,
+            last_n_blocks=args.freeze_last_n_encoder_blocks
+        )
+
     import timm.optim.optim_factory as optim_factory
-    param_groups = optim_factory.param_groups_weight_decay(model_without_ddp, args.weight_decay)
+    #param_groups = optim_factory.param_groups_weight_decay(model_without_ddp, args.weight_decay)
+    #optimizer = torch.optim.AdamW(param_groups, lr=args.lr, betas=(0.9, 0.95))
+    
+    # ---- optimizer: only trainable params ----
+    decay, no_decay = [], []
+    for name, p in model_without_ddp.named_parameters():
+        if not p.requires_grad:
+            continue
+        if p.ndim <= 1 or name.endswith(".bias"):
+            no_decay.append(p)
+        else:
+            decay.append(p)
+
+    param_groups = [
+        {"params": decay, "weight_decay": args.weight_decay},
+        {"params": no_decay, "weight_decay": 0.0},
+    ]
     optimizer = torch.optim.AdamW(param_groups, lr=args.lr, betas=(0.9, 0.95))
 
     loss_scaler = NativeScaler()
