@@ -66,7 +66,7 @@ python -u $CODEDIR/main_pretrain_dem.py \
   --early_stop_min_delta 0.05 \
   --early_stop_warmup_epochs 50 \
   --early_stop_start_threshold 0.1 \
-  --vis_every 1 \
+  --vis_every 20 \
   --vis_n 10 \
   --plot_every 1 \
   --stats_max_files 5000 \

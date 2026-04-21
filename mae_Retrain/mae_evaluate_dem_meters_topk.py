@@ -103,62 +103,6 @@ def rmse_meters_per_sample(model, samples, pred, mask, meta):
 
     return mse_norm_mask, rmse_m_mask, rmse_m_all
 
-@torch.no_grad()
-def _rmse_meters_visible_median_bias_from_pred(model, samples, pred, mask, meta):
-    """
-    Per-sample visible/unmask median-bias correction metrics.
-
-    Returns
-    -------
-    rmse_m_mask_viscorr_ps : torch.Tensor, shape [N]
-    rmse_m_all_viscorr_ps  : torch.Tensor, shape [N]
-    bias_m_vis_med_ps      : torch.Tensor, shape [N]
-    """
-    if meta is None:
-        raise ValueError("meta must be provided for tile-wise evaluation")
-
-    target = model.patchify(samples)   # [N, L, P]
-    pred_f = pred.float()
-    target_f = target.float()
-
-    keep_patch = (mask == 0)           # [N, L]
-    e = pred_f - target_f              # [N, L, P]
-
-    # 1) visible median bias per sample in normalized/model space
-    bias_list = []
-    for i in range(e.shape[0]):
-        ei = e[i]                      # [L, P]
-        ki = keep_patch[i]             # [L]
-        if ki.sum() == 0:
-            bias_list.append(torch.zeros((), device=e.device, dtype=e.dtype))
-        else:
-            vals = ei[ki].reshape(-1)
-            bias_list.append(vals.median())
-
-    bias = torch.stack(bias_list, dim=0)   # [N]
-
-    # 2) apply correction in normalized/model space
-    pred_corr = pred_f - bias[:, None, None]
-    pred_paste = pred_corr.clone()
-    pred_paste[keep_patch] = target_f[keep_patch]
-
-    err = pred_paste - target_f            # [N, L, P]
-
-    # 3) convert to meters per tile
-    tile_std = _meta_to_tile_std_tensor(meta, device=samples.device, dtype=err.dtype).view(-1)  # [N]
-    err_m = err * tile_std[:, None, None]
-    bias_m = bias * tile_std               # [N]
-
-    mse_patch_m = (err_m ** 2).mean(dim=-1)    # [N, L]
-    mask_f = mask.float()
-    denom = mask_f.sum(dim=1).clamp(min=1.0)
-
-    rmse_m_mask_viscorr_ps = torch.sqrt((mse_patch_m * mask_f).sum(dim=1) / denom)   # [N]
-    rmse_m_all_viscorr_ps = torch.sqrt(mse_patch_m.mean(dim=1))                       # [N]
-    bias_m_vis_med_ps = bias_m                                                        # [N]
-
-    return rmse_m_mask_viscorr_ps, rmse_m_all_viscorr_ps, bias_m_vis_med_ps
-    
 def summarize(values: List[float]) -> Dict[str, float]:
     arr = np.asarray(values, dtype=np.float64)
     arr = arr[np.isfinite(arr)]
@@ -220,6 +164,204 @@ def quantile_map_from_visible(pred_patch, target_patch, mask, n_q=101):
 
     pred_corr = torch.from_numpy(pred_corr).to(pred_patch.device, dtype=pred_patch.dtype)
     return pred_corr.view_as(pred_patch)
+
+def _denorm_eval(x: torch.Tensor, meta: dict, norm: dict, use_tile_norm: bool) -> torch.Tensor:
+    """
+    x: [H,W] or [1,H,W] in model space
+    """
+    if use_tile_norm and isinstance(meta, dict):
+        tile_mean = meta["tile_mean_m"]
+        tile_std = meta["tile_std_safe"]
+        if torch.is_tensor(tile_mean):
+            tile_mean = tile_mean.item()
+        if torch.is_tensor(tile_std):
+            tile_std = tile_std.item()
+        return x * float(tile_std) + float(tile_mean)
+
+    method = str(norm.get("method", "meanstd")).lower()
+    if method == "meanstd":
+        return x * float(norm["std"]) + float(norm["mean"])
+    else:
+        vmin = float(norm["min"])
+        vmax = float(norm["max"])
+        return x * (vmax - vmin) + vmin
+
+
+def _write_geotiff_like(ref_path: str, out_path: Path, arr2d, dtype: str = "float32", nodata=None):
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+
+    try:
+        import rasterio
+        with rasterio.open(ref_path) as src:
+            profile = src.profile.copy()
+
+        h, w = arr2d.shape
+        if profile.get("height", None) != h or profile.get("width", None) != w:
+            import tifffile
+            tifffile.imwrite(str(out_path), arr2d.astype(np.float32))
+            return
+
+        profile.update(
+            driver="GTiff",
+            count=1,
+            dtype=dtype,
+            nodata=nodata,
+            compress=profile.get("compress", "LZW"),
+        )
+
+        with rasterio.open(str(out_path), "w", **profile) as dst:
+            dst.write(arr2d, 1)
+
+    except Exception:
+        import tifffile
+        tifffile.imwrite(str(out_path), arr2d.astype(np.float32))
+
+
+def get_or_make_vis_indices(dataset, n: int, seed: int, save_path: str = "") -> np.ndarray:
+    if save_path:
+        save_path = str(save_path)
+        sp = Path(save_path)
+        sp.parent.mkdir(parents=True, exist_ok=True)
+        if sp.exists():
+            idxs = np.loadtxt(sp, dtype=int)
+            return np.atleast_1d(idxs)
+
+    rng = np.random.RandomState(seed)
+    n = min(int(n), len(dataset))
+    idxs = rng.choice(len(dataset), size=n, replace=False).astype(int)
+
+    if save_path:
+        np.savetxt(save_path, idxs, fmt="%d")
+
+    return idxs
+
+
+def _apply_postproc_patch(pred_patch: torch.Tensor, target_patch: torch.Tensor, mask_patch: torch.Tensor, mode: str):
+    """
+    pred_patch, target_patch: [L,P]
+    mask_patch: [L], 0=visible, 1=masked
+    returns corrected pred_patch in model/normalized space
+    """
+    if mode == "median":
+        keep_patch = (mask_patch == 0)
+        if keep_patch.sum() > 0:
+            vis_bias = (pred_patch[keep_patch] - target_patch[keep_patch]).reshape(-1).median()
+        else:
+            vis_bias = torch.tensor(0.0, device=pred_patch.device, dtype=pred_patch.dtype)
+        return pred_patch - vis_bias
+
+    elif mode == "histogram":
+        return quantile_map_from_visible(pred_patch, target_patch, mask_patch)
+
+    else:
+        return pred_patch
+
+
+@torch.no_grad()
+def save_fixed_vis_tifs(model, dataset, idxs: np.ndarray, device, args, out_dir: Path, norm: dict):
+    """
+    Save a fixed set of GeoTIFF visualizations for evaluation.
+    Output:
+      - gt_m.tif
+      - pred_m.tif
+      - recon_m.tif
+      - err_m.tif
+      - mask.tif
+      - pred_post_m.tif / recon_post_m.tif / err_post_m.tif (if postproc != none)
+    """
+    out_vis = out_dir / "vis_tif"
+    out_vis.mkdir(parents=True, exist_ok=True)
+
+    model.eval()
+
+    for idx in idxs.tolist():
+        sample = dataset[int(idx)]
+
+        if isinstance(sample, (tuple, list)):
+            if len(sample) == 3:
+                x, meta, ref_path = sample
+            elif len(sample) == 2:
+                x, meta = sample
+                ref_path = meta["path"] if isinstance(meta, dict) and "path" in meta else dataset.files[int(idx)]
+            else:
+                x = sample[0]
+                meta = None
+                ref_path = dataset.files[int(idx)]
+        else:
+            x = sample
+            meta = None
+            ref_path = dataset.files[int(idx)]
+
+        x = x.unsqueeze(0).to(device, non_blocking=True)  # [1,1,H,W]
+
+        # fixed mask per tile for reproducible eval visualization
+        cpu_state = torch.random.get_rng_state()
+        cuda_state = torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None
+
+        vis_seed = int(args.seed + 100000 + int(idx))
+        torch.manual_seed(vis_seed)
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed_all(vis_seed)
+
+        if device.type == "cuda" and args.amp:
+            with torch.cuda.amp.autocast():
+                _, pred, mask = model(x, mask_ratio=args.mask_ratio)
+        else:
+            _, pred, mask = model(x, mask_ratio=args.mask_ratio)
+
+        torch.random.set_rng_state(cpu_state)
+        if cuda_state is not None:
+            torch.cuda.set_rng_state_all(cuda_state)
+
+        pred_img = model.unpatchify(pred)[0, 0].float().cpu()
+        p = model.patch_embed.patch_size[0]
+        mask_img = mask.unsqueeze(-1).repeat(1, 1, p * p * args.in_chans)
+        mask_img = model.unpatchify(mask_img)[0, 0].float().cpu()   # [H,W], 1=masked
+        x0 = x[0, 0].float().cpu()
+
+        recon = x0 * (1 - mask_img) + pred_img * mask_img
+
+        target_patch = model.patchify(x)[0].float().cpu()
+        pred_patch = pred[0].float().cpu()
+        mask_patch = mask[0].float().cpu()
+
+        pred_patch_post = _apply_postproc_patch(pred_patch, target_patch, mask_patch, args.postproc)
+        pred_post_img = model.unpatchify(pred_patch_post.unsqueeze(0).to(device))[0, 0].float().cpu()
+        recon_post = x0 * (1 - mask_img) + pred_post_img * mask_img
+
+        gt_m = _denorm_eval(x0, meta, norm, args.tile_norm).cpu()
+        pred_m = _denorm_eval(pred_img, meta, norm, args.tile_norm).cpu()
+        recon_m = _denorm_eval(recon, meta, norm, args.tile_norm).cpu()
+
+        pred_post_m = _denorm_eval(pred_post_img, meta, norm, args.tile_norm).cpu()
+        recon_post_m = _denorm_eval(recon_post, meta, norm, args.tile_norm).cpu()
+
+        err_m = (recon_m - gt_m).cpu()
+        err_post_m = (recon_post_m - gt_m).cpu()
+
+        gt_np = gt_m.numpy().astype(np.float32, copy=False)
+        pred_np = pred_m.numpy().astype(np.float32, copy=False)
+        recon_np = recon_m.numpy().astype(np.float32, copy=False)
+        err_np = err_m.numpy().astype(np.float32, copy=False)
+        mask_np = (mask_img.numpy() > 0.5).astype(np.uint8)
+        mask_mean = float(mask_np.mean())
+        print(f"[VIS_MASK] idx={int(idx)} mask_mean={mask_mean:.4f}")
+        
+        pred_post_np = pred_post_m.numpy().astype(np.float32, copy=False)
+        recon_post_np = recon_post_m.numpy().astype(np.float32, copy=False)
+        err_post_np = err_post_m.numpy().astype(np.float32, copy=False)
+
+        base = f"idx{int(idx):06d}"
+        _write_geotiff_like(ref_path, out_vis / f"{base}_gt_m.tif", gt_np, dtype="float32", nodata=None)
+        _write_geotiff_like(ref_path, out_vis / f"{base}_pred_m.tif", pred_np, dtype="float32", nodata=None)
+        _write_geotiff_like(ref_path, out_vis / f"{base}_recon_m.tif", recon_np, dtype="float32", nodata=None)
+        _write_geotiff_like(ref_path, out_vis / f"{base}_err_m.tif", err_np, dtype="float32", nodata=None)
+        _write_geotiff_like(ref_path, out_vis / f"{base}_mask.tif", mask_np, dtype="uint8", nodata=None)
+
+        if args.postproc != "none":
+            _write_geotiff_like(ref_path, out_vis / f"{base}_pred_post_m.tif", pred_post_np, dtype="float32", nodata=None)
+            _write_geotiff_like(ref_path, out_vis / f"{base}_recon_post_m.tif", recon_post_np, dtype="float32", nodata=None)
+            _write_geotiff_like(ref_path, out_vis / f"{base}_err_post_m.tif", err_post_np, dtype="float32", nodata=None)
 
 @torch.no_grad()
 def _rmse_meters_postproc_from_pred(model, samples, pred, mask, meta, mode="none"):
@@ -297,6 +439,10 @@ def main():
     ap.add_argument("--bottleneck_norm", default="none", choices=["none", "inst1d"])
     ap.add_argument("--loss_mode", default="mse", choices=["mse"])
     ap.add_argument("--postproc", default="none", choices=["none", "median", "histogram"])
+    ap.add_argument("--save_vis_tif", action="store_true", help="Save fixed-sample GeoTIFF visualizations during evaluation")
+    ap.add_argument("--vis_n", type=int, default=10, help="Number of fixed samples to visualize")
+    ap.add_argument("--vis_seed", type=int, default=42, help="Seed for fixed visualization sample selection")
+    ap.add_argument("--vis_indices_txt", default="", help="Optional txt file to store/reuse fixed visualization indices across runs")
     args = ap.parse_args()
 
     out_dir = Path(args.output_dir)
@@ -435,6 +581,7 @@ def main():
         "norm_json": os.path.abspath(args.norm_json),
         "mask_ratio": args.mask_ratio,
         "norm_method": method,
+        "postproc": args.postproc,
         "rmse_m_mask": summarize(rmse_mask_list),
         "rmse_m_all": summarize(rmse_all_list),
         "rmse_m_mask_viscorr": summarize(rmse_mask_viscorr_list),
@@ -474,6 +621,12 @@ def main():
                     "bias_m_vis_med": r["bias_m_vis_med"],
                     "mse_norm_mask": r["mse_norm_mask"],
                 })
+
+    # fixed-sample GeoTIFF visualization
+    if args.save_vis_tif and args.vis_n > 0:
+        vis_idx_path = args.vis_indices_txt if args.vis_indices_txt else str(out_dir / "vis_indices.txt")
+        idxs = get_or_make_vis_indices(ds, args.vis_n, args.vis_seed, vis_idx_path)
+        save_fixed_vis_tifs(model, ds, idxs, device, args, out_dir, norm)
 
     print("[DONE]", csv_path)
     print("[DONE]", out_dir / "summary.json")
