@@ -34,31 +34,66 @@ def _unwrap_batch(batch):
       - (x, path)
       - (x, meta)
       - (x, meta, path)
+      - (x, lcc_mask)
+      - (x, meta, lcc_mask)
+      - (x, meta, path, lcc_mask)
+    Returns: samples, meta, path, lcc_mask
     """
-    samples = None
-    meta = None
-    path = None
-
     if isinstance(batch, dict):
-        samples = batch["image"]
+        samples = batch.get("image", batch.get("x"))
         meta = batch.get("meta", None)
         path = batch.get("path", None)
-        return samples, meta, path
+        lcc_mask = batch.get("lcc_mask", None)
+        return samples, meta, path, lcc_mask
 
     if not isinstance(batch, (tuple, list)):
-        return batch, None, None
+        return batch, None, None, None
 
     if len(batch) == 1:
-        return batch[0], None, None
-    if len(batch) == 2:
-        # heuristic: second is meta dict or path list
-        if isinstance(batch[1], dict):
-            return batch[0], batch[1], None
-        return batch[0], None, batch[1]
-    if len(batch) >= 3:
-        return batch[0], batch[1], batch[2]
+        return batch[0], None, None, None
 
-    return batch[0], None, None
+    if len(batch) == 2:
+        # (x, lcc_mask) or (x, meta/path)
+        if torch.is_tensor(batch[1]):
+            return batch[0], None, None, batch[1]
+        if isinstance(batch[1], dict):
+            return batch[0], batch[1], None, None
+        return batch[0], None, batch[1], None
+
+    if len(batch) == 3:
+        # Preferred paired no-path format: (x, meta, lcc_mask)
+        if isinstance(batch[1], dict) and torch.is_tensor(batch[2]):
+            return batch[0], batch[1], None, batch[2]
+        # Alternative: (x, lcc_mask, meta)
+        if torch.is_tensor(batch[1]) and isinstance(batch[2], dict):
+            return batch[0], batch[2], None, batch[1]
+        # Original DEM path format: (x, meta, path)
+        return batch[0], batch[1], batch[2], None
+
+    # Preferred paired path format: (x, meta, path, lcc_mask)
+    if len(batch) >= 4:
+        if torch.is_tensor(batch[3]):
+            return batch[0], batch[1], batch[2], batch[3]
+        if torch.is_tensor(batch[1]):
+            return batch[0], batch[2], batch[3], batch[1]
+        return batch[0], batch[1], batch[2], None
+
+    return batch[0], None, None, None
+
+
+def _model_forward(model, samples, args, lcc_mask=None):
+    """Centralized model call so LCC options stay identical in train/eval."""
+    if lcc_mask is not None:
+        return model(
+            samples,
+            mask_ratio=getattr(args, "mask_ratio", 0.75),
+            lcc_mask=lcc_mask,
+            loss_on_lcc_only=getattr(args, "loss_on_lcc_only", False),
+            lcc_priority=getattr(args, "lcc_priority", 10.0),
+            lcc_mask_mode=getattr(args, "lcc_mask_mode", "exact"),
+            lcc_patch_threshold=getattr(args, "lcc_patch_threshold", 0.5),
+        )
+    return model(samples, mask_ratio=getattr(args, "mask_ratio", 0.75))
 
 def _meta_to_tile_std_tensor(meta, device, dtype=torch.float32):
     """
@@ -194,8 +229,10 @@ def train_one_epoch(
         print('log_dir:', log_writer.log_dir)
 
     for data_iter_step, batch in enumerate(metric_logger.log_every(data_loader, print_freq, header)):
-        samples, meta, _ = _unwrap_batch(batch)
+        samples, meta, _, lcc_mask = _unwrap_batch(batch)
         samples = samples.to(device, non_blocking=True)
+        if lcc_mask is not None:
+            lcc_mask = lcc_mask.to(device, non_blocking=True)
 
         # per-iteration lr schedule
         if data_iter_step % accum_iter == 0:
@@ -203,7 +240,7 @@ def train_one_epoch(
 
         # NOTE: FutureWarning about autocast API is harmless; we keep compatibility.
         with torch.cuda.amp.autocast(enabled=getattr(args, "amp", True)):
-            loss, pred, mask = model(samples, mask_ratio=args.mask_ratio)
+            loss, pred, mask = _model_forward(model, samples, args, lcc_mask=lcc_mask)
 
         loss_value = loss.item()
 
@@ -238,6 +275,9 @@ def train_one_epoch(
             metric_logger.update(rmse_m_mask=float(rmse_mask_m.item()))
             metric_logger.update(rmse_m_all=float(rmse_all_m.item()))
 
+            if lcc_mask is not None:
+                metric_logger.update(actual_mask_ratio=float(mask.float().mean().item()))
+
         # logging
         if log_writer is not None and (data_iter_step + 1) % accum_iter == 0:
             epoch_1000x = int((data_iter_step / len(data_loader) + epoch) * 1000)
@@ -269,11 +309,13 @@ def evaluate_one_epoch(
     print_freq = 50
 
     for data_iter_step, batch in enumerate(metric_logger.log_every(data_loader, print_freq, header)):
-        samples, meta, _ = _unwrap_batch(batch)
+        samples, meta, _, lcc_mask = _unwrap_batch(batch)
         samples = samples.to(device, non_blocking=True)
+        if lcc_mask is not None:
+            lcc_mask = lcc_mask.to(device, non_blocking=True)
         
         with torch.cuda.amp.autocast(enabled=getattr(args, "amp", True)):
-            loss, pred, mask = model(samples, mask_ratio=args.mask_ratio)
+            loss, pred, mask = _model_forward(model, samples, args, lcc_mask=lcc_mask)
 
         loss_value = loss.item()
         metric_logger.update(loss=loss_value)
@@ -298,6 +340,9 @@ def evaluate_one_epoch(
             metric_logger.update(rmse_m_mask_viscorr=float(rmse_mask_vis_m.item()))
             metric_logger.update(rmse_m_all_viscorr=float(rmse_all_vis_m.item()))
             metric_logger.update(bias_m_vis_med=float(bias_vis_m.item()))
+
+            if lcc_mask is not None:
+                metric_logger.update(actual_mask_ratio=float(mask.float().mean().item()))
             
     metric_logger.synchronize_between_processes()
 

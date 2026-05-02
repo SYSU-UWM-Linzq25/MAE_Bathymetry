@@ -38,7 +38,7 @@ import util.misc as misc
 from util.misc import NativeScalerWithGradNormCount as NativeScaler
 import models_mae
 from engine_pretrain import train_one_epoch, evaluate_one_epoch
-from util.dem_dataset import DEMTileDataset, compute_dem_stats, load_json, save_json
+from util.dem_dataset import DEMTileDataset, DEMLCCPairDataset, compute_dem_stats, load_json, save_json
 
 def _denorm(x: torch.Tensor, meta: dict, args) -> torch.Tensor:
     """
@@ -136,9 +136,16 @@ def visualize_fixed_tiles_geotiff(model, dataset, idxs: np.ndarray, device, epoc
     for k, idx in enumerate(idxs.tolist()):
         sample = dataset[int(idx)]
 
+        lcc_mask = None
         if isinstance(sample, (tuple, list)):
-            if len(sample) == 3:
-                x, meta, ref_path = sample
+            if len(sample) == 4:
+                x, meta, ref_path, lcc_mask = sample
+            elif len(sample) == 3:
+                if torch.is_tensor(sample[2]):
+                    x, meta, lcc_mask = sample
+                    ref_path = meta["path"] if isinstance(meta, dict) and "path" in meta else dataset.files[int(idx)]
+                else:
+                    x, meta, ref_path = sample
             elif len(sample) == 2:
                 x, meta = sample
                 ref_path = meta["path"] if isinstance(meta, dict) and "path" in meta else dataset.files[int(idx)]
@@ -152,6 +159,8 @@ def visualize_fixed_tiles_geotiff(model, dataset, idxs: np.ndarray, device, epoc
             ref_path = dataset.files[int(idx)]
 
         x = x.unsqueeze(0).to(device, non_blocking=True)  # [1,1,H,W]
+        if lcc_mask is not None:
+            lcc_mask = lcc_mask.unsqueeze(0).to(device, non_blocking=True)
 
         # fixed visualization mask per tile
         cpu_state = torch.random.get_rng_state()
@@ -163,7 +172,17 @@ def visualize_fixed_tiles_geotiff(model, dataset, idxs: np.ndarray, device, epoc
             torch.cuda.manual_seed_all(vis_seed)
 
         with torch.cuda.amp.autocast(enabled=getattr(args, "amp", True)):
-            _, pred, mask = model(x, mask_ratio=args.mask_ratio)
+            if lcc_mask is not None:
+                _, pred, mask = model(
+                    x, mask_ratio=args.mask_ratio,
+                    lcc_mask=lcc_mask,
+                    loss_on_lcc_only=getattr(args, "loss_on_lcc_only", False),
+                    lcc_priority=getattr(args, "lcc_priority", 10.0),
+                    lcc_mask_mode=getattr(args, "lcc_mask_mode", "exact"),
+                    lcc_patch_threshold=getattr(args, "lcc_patch_threshold", 0.5),
+                )
+            else:
+                _, pred, mask = model(x, mask_ratio=args.mask_ratio)
 
         # restore RNG states so visualization does not affect later randomness
         torch.random.set_rng_state(cpu_state)
@@ -224,39 +243,43 @@ def visualize_fixed_tiles_geotiff(model, dataset, idxs: np.ndarray, device, epoc
         _write_geotiff_like(ref_path, out_epoch / f"{base}_err_viscorr_m.tif", err_corr_np, dtype="float32", nodata=None)
 
         _write_geotiff_like(ref_path, out_epoch / f"{base}_mask.tif", mask_np, dtype="uint8", nodata=0)
+        if lcc_mask is not None:
+            lcc_np = (lcc_mask[0, 0].float().detach().cpu().numpy() > 0.5).astype(np.uint8)
+            _write_geotiff_like(ref_path, out_epoch / f"{base}_lcc_input_mask.tif", lcc_np, dtype="uint8", nodata=0)
 
         # output Histogram and scatter to help evaluation
         # masked-only diagnostics
         masked_vals_gt = gt_np[mask_np > 0]
         masked_vals_recon = recon_np[mask_np > 0]
         masked_vals_recon_corr = recon_corr_np[mask_np > 0]
-        masked_err = masked_vals_recon - masked_vals_gt
-        masked_err_corr = masked_vals_recon_corr - masked_vals_gt
+        if masked_vals_gt.size > 0:
+            masked_err = masked_vals_recon - masked_vals_gt
+            masked_err_corr = masked_vals_recon_corr - masked_vals_gt
 
-        # histogram
-        plt.figure(figsize=(5, 4))
-        plt.hist(masked_err, bins=60, alpha=0.6, label='raw')
-        plt.hist(masked_err_corr, bins=60, alpha=0.6, label='viscorr')
-        plt.xlabel('Error (m)')
-        plt.ylabel('Count')
-        plt.legend()
-        plt.tight_layout()
-        plt.savefig(out_epoch / f"{base}_err_hist.png", dpi=150)
-        plt.close()
+            # histogram
+            plt.figure(figsize=(5, 4))
+            plt.hist(masked_err, bins=60, alpha=0.6, label='raw')
+            plt.hist(masked_err_corr, bins=60, alpha=0.6, label='viscorr')
+            plt.xlabel('Error (m)')
+            plt.ylabel('Count')
+            plt.legend()
+            plt.tight_layout()
+            plt.savefig(out_epoch / f"{base}_err_hist.png", dpi=150)
+            plt.close()
 
-        # scatter
-        plt.figure(figsize=(5, 5))
-        plt.scatter(masked_vals_gt, masked_vals_recon, s=2, alpha=0.3, label='raw')
-        plt.scatter(masked_vals_gt, masked_vals_recon_corr, s=2, alpha=0.3, label='viscorr')
-        vmin = float(np.min(masked_vals_gt))
-        vmax = float(np.max(masked_vals_gt))
-        plt.plot([vmin, vmax], [vmin, vmax], '--')
-        plt.xlabel('GT (m)')
-        plt.ylabel('Recon (m)')
-        plt.legend()
-        plt.tight_layout()
-        plt.savefig(out_epoch / f"{base}_gt_vs_recon_scatter.png", dpi=150)
-        plt.close()
+            # scatter
+            plt.figure(figsize=(5, 5))
+            plt.scatter(masked_vals_gt, masked_vals_recon, s=2, alpha=0.3, label='raw')
+            plt.scatter(masked_vals_gt, masked_vals_recon_corr, s=2, alpha=0.3, label='viscorr')
+            vmin = float(np.min(masked_vals_gt))
+            vmax = float(np.max(masked_vals_gt))
+            plt.plot([vmin, vmax], [vmin, vmax], '--')
+            plt.xlabel('GT (m)')
+            plt.ylabel('Recon (m)')
+            plt.legend()
+            plt.tight_layout()
+            plt.savefig(out_epoch / f"{base}_gt_vs_recon_scatter.png", dpi=150)
+            plt.close()
 
 def get_args_parser():
     parser = argparse.ArgumentParser('MAE pre-training (DEM GeoTIFF)', add_help=False)
@@ -270,6 +293,27 @@ def get_args_parser():
     parser.add_argument('--train_list', type=str, default='', help='TXT list of train GeoTIFF paths')
     parser.add_argument('--val_list', type=str, default='', help='TXT list of val GeoTIFF paths')
     parser.add_argument('--test_list', type=str, default='', help='TXT list of test GeoTIFF paths')
+
+    # --- LCC mask pairing for real bathymetry downstream adaptation ---
+    parser.add_argument('--lcc_mask_path', type=str, default='',
+                        help='Root folder containing LCC mask GeoTIFFs paired with bathy/DEM tiles by filename key.')
+    parser.add_argument('--train_lcc_list', type=str, default='', help='TXT list of train LCC mask paths, line-by-line paired with --train_list')
+    parser.add_argument('--val_lcc_list', type=str, default='', help='TXT list of val LCC mask paths, line-by-line paired with --val_list')
+    parser.add_argument('--test_lcc_list', type=str, default='', help='TXT list of test LCC mask paths, line-by-line paired with --test_list')
+    parser.add_argument('--lcc_mask_mode', default='exact', choices=['none', 'priority', 'exact'],
+                        help='none=random MAE mask; priority=fixed mask_ratio but prioritize LCC; exact=mask exactly LCC patches, variable ratio per tile.')
+    parser.add_argument('--loss_on_lcc_only', action='store_true',
+                        help='Compute loss only on masked LCC patches when LCC mask is provided.')
+    parser.add_argument('--lcc_priority', default=10.0, type=float,
+                        help='Priority weight used only when --lcc_mask_mode priority.')
+    parser.add_argument('--lcc_patch_threshold', default=0.5, type=float,
+                        help='Patch is LCC if max-pooled LCC value > threshold.')
+    parser.add_argument('--tile_norm_visible_only', action='store_true',
+                        help='With --tile_norm and LCC data, compute tile mean/std using only non-LCC visible/known pixels.')
+    parser.add_argument('--min_lcc_patch_ratio', default=0.0, type=float,
+                        help='Optional filter: drop tiles whose LCC patch ratio is below this value.')
+    parser.add_argument('--max_lcc_patch_ratio', default=1.0, type=float,
+                        help='Optional filter: drop tiles whose LCC patch ratio is above this value.')
     parser.add_argument('--extra_eval_dir', type=str, default='',
                         help='An extra directory to evaluate at the end (e.g., KY holdout tiles).')
 
@@ -559,54 +603,53 @@ def main(args):
     val_dir = _resolve_split_dir(args.data_root, 'val', args.val_dir)
     test_dir = _resolve_split_dir(args.data_root, 'test', args.test_dir)
 
-    train_ds = DEMTileDataset(
-        dir_path=train_dir if not args.train_list else '',
-        list_path=args.train_list if args.train_list else '',
-        input_size=args.input_size,
-        nodata=args.nodata,
-        random_flip=True,
-        return_path=False,
-        tile_norm=args.tile_norm,
-        tile_norm_eps=args.tile_norm_eps,
-        return_meta=True,
-    )
+    use_lcc = bool(args.lcc_mask_path or args.train_lcc_list or args.val_lcc_list or args.test_lcc_list)
+    if use_lcc and args.lcc_mask_mode == 'none':
+        print('[WARN] LCC masks are provided but --lcc_mask_mode none; masks will be loaded but ignored by the model.')
+    if use_lcc:
+        print(f'[DATA] Using paired DEM/bathy + LCC masks. mode={args.lcc_mask_mode}, visible_tile_norm={args.tile_norm_visible_only}')
 
-    val_ds = DEMTileDataset(
-        dir_path=val_dir if not args.val_list else '',
-        list_path=args.val_list if args.val_list else '',
-        input_size=args.input_size,
-        nodata=args.nodata,
-        random_flip=False,
-        return_path=False,
-        tile_norm=args.tile_norm,
-        tile_norm_eps=args.tile_norm_eps,
-        return_meta=True,
-    )
+    def _make_dataset(split_name: str, random_flip: bool, return_path: bool):
+        dem_dir = {'train': train_dir, 'val': val_dir, 'test': test_dir}[split_name]
+        dem_list = getattr(args, f'{split_name}_list')
+        lcc_list = getattr(args, f'{split_name}_lcc_list')
+        if use_lcc:
+            return DEMLCCPairDataset(
+                dem_dir=dem_dir if not dem_list else '',
+                lcc_dir=args.lcc_mask_path if args.lcc_mask_path else '',
+                dem_list_path=dem_list if dem_list else None,
+                lcc_list_path=lcc_list if lcc_list else None,
+                input_size=args.input_size,
+                nodata=args.nodata,
+                random_flip=random_flip,
+                return_path=return_path,
+                tile_norm=args.tile_norm,
+                tile_norm_eps=args.tile_norm_eps,
+                return_meta=True,
+                tile_norm_visible_only=args.tile_norm_visible_only,
+                min_lcc_patch_ratio=args.min_lcc_patch_ratio,
+                max_lcc_patch_ratio=args.max_lcc_patch_ratio,
+                patch_size=16,
+                lcc_patch_threshold=args.lcc_patch_threshold,
+            )
+        return DEMTileDataset(
+            dir_path=dem_dir if not dem_list else '',
+            list_path=dem_list if dem_list else '',
+            input_size=args.input_size,
+            nodata=args.nodata,
+            random_flip=random_flip,
+            return_path=return_path,
+            tile_norm=args.tile_norm,
+            tile_norm_eps=args.tile_norm_eps,
+            return_meta=True,
+        )
+
+    train_ds = _make_dataset('train', random_flip=True, return_path=False)
+    val_ds = _make_dataset('val', random_flip=False, return_path=False)
 
     # ---- visualization datasets (NO random flip; can return file path) ----
-    train_vis_ds = DEMTileDataset(
-        dir_path=train_dir if not args.train_list else '',
-        list_path=args.train_list if args.train_list else '',
-        input_size=args.input_size,
-        nodata=args.nodata,
-        random_flip=False,
-        return_path=True,
-        tile_norm=args.tile_norm,
-        tile_norm_eps=args.tile_norm_eps,
-        return_meta=True,
-    )
-
-    val_vis_ds = DEMTileDataset(
-        dir_path=val_dir if not args.val_list else '',
-        list_path=args.val_list if args.val_list else '',
-        input_size=args.input_size,
-        nodata=args.nodata,
-        random_flip=False,
-        return_path=True,
-        tile_norm=args.tile_norm,
-        tile_norm_eps=args.tile_norm_eps,
-        return_meta=True,
-    )
+    train_vis_ds = _make_dataset('train', random_flip=False, return_path=True)
+    val_vis_ds = _make_dataset('val', random_flip=False, return_path=True)
 
     # ---- compute / load global normalization (TRAIN only) ----
     norm_path = args.norm_json
@@ -895,6 +938,8 @@ def main(args):
                     'val_rmse_m_mask_viscorr': float(val_stats.get('rmse_m_mask_viscorr', nan)),
                     'val_rmse_m_all_viscorr': float(val_stats.get('rmse_m_all_viscorr', nan)),
                     'val_bias_m_vis_med': float(val_stats.get('bias_m_vis_med', nan)),
+                    'train_actual_mask_ratio': float(train_stats.get('actual_mask_ratio', nan)),
+                    'val_actual_mask_ratio': float(val_stats.get('actual_mask_ratio', nan)),
                 })
     
             # replace existing epoch row if present (safe for resume)
@@ -908,6 +953,7 @@ def main(args):
                   'train_rmse_m_mask','val_rmse_m_mask','train_rmse_m_all','val_rmse_m_all',
                   'train_rmse_m_mask_viscorr','val_rmse_m_mask_viscorr','train_rmse_m_all_viscorr','val_rmse_m_all_viscorr',
                   'train_bias_m_vis_med','val_bias_m_vis_med',
+                  'train_actual_mask_ratio','val_actual_mask_ratio',
                 ]
             _save_history(history_csv, history, fieldnames)
 
@@ -969,17 +1015,40 @@ def main(args):
     def _maybe_eval(split_name: str, dir_path: str, list_path: str, out_tag: str):
         if not dir_path and not list_path:
             return                
-        ds = DEMTileDataset(
-            dir_path=dir_path if dir_path else None,
-            list_path=list_path if list_path else None,
-            input_size=args.input_size,
-            nodata=args.nodata,
-            random_flip=False,
-            return_path=False,
-            tile_norm=args.tile_norm,
-            tile_norm_eps=args.tile_norm_eps,
-            return_meta=True,
-        )
+        if use_lcc:
+            lcc_list_path = ''
+            if out_tag == 'test':
+                lcc_list_path = args.test_lcc_list
+            ds = DEMLCCPairDataset(
+                dem_dir=dir_path if dir_path else '',
+                lcc_dir=args.lcc_mask_path if args.lcc_mask_path else '',
+                dem_list_path=list_path if list_path else None,
+                lcc_list_path=lcc_list_path if lcc_list_path else None,
+                input_size=args.input_size,
+                nodata=args.nodata,
+                random_flip=False,
+                return_path=False,
+                tile_norm=args.tile_norm,
+                tile_norm_eps=args.tile_norm_eps,
+                return_meta=True,
+                tile_norm_visible_only=args.tile_norm_visible_only,
+                min_lcc_patch_ratio=args.min_lcc_patch_ratio,
+                max_lcc_patch_ratio=args.max_lcc_patch_ratio,
+                patch_size=16,
+                lcc_patch_threshold=args.lcc_patch_threshold,
+            )
+        else:
+            ds = DEMTileDataset(
+                dir_path=dir_path if dir_path else None,
+                list_path=list_path if list_path else None,
+                input_size=args.input_size,
+                nodata=args.nodata,
+                random_flip=False,
+                return_path=False,
+                tile_norm=args.tile_norm,
+                tile_norm_eps=args.tile_norm_eps,
+                return_meta=True,
+            )
         # apply same TRAIN normalization
         if args.norm_method == 'meanstd':
             ds.set_norm(args.norm_mean, args.norm_std)

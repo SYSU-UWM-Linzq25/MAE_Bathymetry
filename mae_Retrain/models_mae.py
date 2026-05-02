@@ -10,6 +10,7 @@
 from functools import partial
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import numpy as np
 from timm.models.vision_transformer import PatchEmbed, Block
 from util.pos_embed import get_2d_sincos_pos_embed
@@ -173,24 +174,128 @@ class MaskedAutoencoderViT(nn.Module):
         mask = torch.gather(mask, dim=1, index=ids_restore)
         return x_masked, mask, ids_restore
     
-    def forward_encoder(self, x, mask_ratio):
+    def _lcc_patch_from_mask(self, lcc_mask, threshold: float = 0.5):
+        """
+        Convert pixel-space LCC mask [N,1,H,W] to patch-space mask [N,L].
+        Any positive LCC pixel inside a patch marks that patch as LCC/masked.
+        """
+        p = self.patch_embed.patch_size[0]
+        m = F.max_pool2d(lcc_mask.float(), kernel_size=p, stride=p)
+        return (m > float(threshold)).flatten(1).float()
+
+    def lcc_priority_masking(self, x, mask_ratio, lcc_patch, priority=10.0):
+        """
+        Fixed-ratio LCC-priority masking. This is kept for compatibility with
+        the old Jan-2026 code: LCC patches receive higher masking priority, but
+        the final mask ratio is still fixed by mask_ratio.
+        """
+        N, L, D = x.shape
+        len_keep = int(L * (1 - mask_ratio))
+        len_keep = max(1, min(L, len_keep))
+
+        noise = torch.rand(N, L, device=x.device)
+        score = noise + lcc_patch.float() * float(priority)
+
+        ids_shuffle = torch.argsort(score, dim=1)  # small score -> keep
+        ids_restore = torch.argsort(ids_shuffle, dim=1)
+        ids_keep = ids_shuffle[:, :len_keep]
+
+        x_masked = torch.gather(x, dim=1, index=ids_keep.unsqueeze(-1).repeat(1, 1, D))
+
+        mask = torch.ones([N, L], device=x.device)
+        mask[:, :len_keep] = 0
+        mask = torch.gather(mask, dim=1, index=ids_restore)
+        return x_masked, mask, ids_restore
+
+    def forward_encoder(self, x, mask_ratio, lcc_mask=None, lcc_priority=10.0,
+                        lcc_mask_mode="none", lcc_patch_threshold=0.5):
         # embed patches
         x = self.patch_embed(x)
         # add pos embed w/o cls token
         x = x + self.pos_embed[:, 1:, :]
-        # masking: length -> length * mask_ratio
-        x, mask, ids_restore = self.random_masking(x, mask_ratio)
-        #x, mask, ids_restore = self.middle_masking(x, mask_ratio)
-        
+
+        lcc_patch = None
+        if lcc_mask is not None and lcc_mask_mode == "priority":
+            lcc_patch = self._lcc_patch_from_mask(lcc_mask, threshold=lcc_patch_threshold)
+            x, mask, ids_restore = self.lcc_priority_masking(
+                x, mask_ratio, lcc_patch=lcc_patch, priority=lcc_priority
+            )
+        else:
+            # Default upstream behavior: per-sample random masking.
+            x, mask, ids_restore = self.random_masking(x, mask_ratio)
+
         # append cls token
         cls_token = self.cls_token + self.pos_embed[:, :1, :]
         cls_tokens = cls_token.expand(x.shape[0], -1, -1)
         x = torch.cat((cls_tokens, x), dim=1)
+
         # apply Transformer blocks
         for blk in self.blocks:
             x = blk(x)
         x = self.norm(x)
-        return x, mask, ids_restore
+        return x, mask, ids_restore, lcc_patch
+
+    def forward_lcc_exact(self, imgs, lcc_mask, lcc_patch_threshold=0.5):
+        """
+        Exact LCC masking for real bathymetry downstream adaptation.
+
+        Important difference from fixed mask_ratio MAE:
+          - The patch mask is determined by each tile's LCC mask.
+          - Therefore the actual mask ratio can vary from tile to tile.
+          - To support variable visible-token counts inside one batch, this
+            function processes the encoder/decoder sample-by-sample and then
+            concatenates predictions back to [N,L,P].
+
+        This is slower than fixed-ratio masking but is the cleanest way to avoid
+        artificially masking extra non-LCC patches just to force a fixed ratio.
+        """
+        x_all = self.patch_embed(imgs)
+        x_all = x_all + self.pos_embed[:, 1:, :]
+        lcc_patch = self._lcc_patch_from_mask(lcc_mask, threshold=lcc_patch_threshold)  # [N,L]
+
+        preds = []
+        masks = []
+        N, L, D = x_all.shape
+        for i in range(N):
+            xi = x_all[i:i + 1]              # [1,L,D]
+            li = lcc_patch[i].bool()         # True = masked/LCC
+
+            ids_keep = torch.nonzero(~li, as_tuple=False).flatten()
+            ids_mask = torch.nonzero(li, as_tuple=False).flatten()
+
+            # Extremely defensive fallback: if the whole tile is LCC, keep one
+            # token so the encoder has at least one non-cls token.
+            if ids_keep.numel() == 0:
+                ids_keep = ids_mask[:1]
+                ids_mask = ids_mask[1:]
+                li = torch.ones(L, device=imgs.device, dtype=torch.bool)
+                li[ids_keep] = False
+
+            ids_shuffle = torch.cat([ids_keep, ids_mask], dim=0)  # keep first, mask after
+            ids_restore = torch.argsort(ids_shuffle, dim=0).unsqueeze(0)  # [1,L]
+
+            x_masked = torch.gather(
+                xi, dim=1,
+                index=ids_keep.view(1, -1, 1).repeat(1, 1, D)
+            )
+
+            cls_token = self.cls_token + self.pos_embed[:, :1, :]
+            cls_tokens = cls_token.expand(1, -1, -1)
+            latent = torch.cat((cls_tokens, x_masked), dim=1)
+
+            for blk in self.blocks:
+                latent = blk(latent)
+            latent = self.norm(latent)
+            latent = self._apply_bottleneck_norm(latent)
+
+            pred_i = self.forward_decoder(latent, ids_restore)  # [1,L,P]
+            preds.append(pred_i)
+            masks.append(li.float().view(1, L))
+
+        pred = torch.cat(preds, dim=0)
+        mask = torch.cat(masks, dim=0)
+        return pred, mask, lcc_patch
+
     def forward_decoder(self, x, ids_restore):
         # embed tokens
         x = self.decoder_embed(x)
@@ -210,25 +315,36 @@ class MaskedAutoencoderViT(nn.Module):
         # remove cls token
         x = x[:, 1:, :]
         return x
-    def forward_loss(self, imgs, pred, mask):
+    def forward_loss(self, imgs, pred, mask, lcc_patch=None, loss_on_lcc_only=False):
         """
-        imgs: [N, 3, H, W]
-        pred: [N, L, p*p*3]
-        mask: [N, L], 0 is keep, 1 is remove, 
+        imgs: [N, C, H, W]
+        pred: [N, L, p*p*C]
+        mask: [N, L], 0 is keep, 1 is remove
+        lcc_patch: optional [N,L], 1 is LCC/river patch
         """
-
         target = self.patchify(imgs)
         if self.norm_pix_loss:
             mean = target.mean(dim=-1, keepdim=True)
             var = target.var(dim=-1, keepdim=True)
             target = (target - mean) / (var + 1.e-6)**.5
-        
-        # default mse (masked-only)
+
         loss = (pred - target) ** 2
         loss = loss.mean(dim=-1)  # [N, L], mean loss per patch
-        loss = (loss * mask).sum() / mask.sum()  # mean loss on removed patches
-        return loss
-    
+
+        if loss_on_lcc_only and (lcc_patch is not None):
+            weight = mask.float() * lcc_patch.float()
+            denom = weight.sum()
+            if denom > 0:
+                return (loss * weight).sum() / denom
+
+        denom = mask.float().sum()
+        if denom > 0:
+            return (loss * mask.float()).sum() / denom
+
+        # Batch has no masked patches, e.g. all samples have empty LCC masks in
+        # exact mode. Return a differentiable zero rather than NaN.
+        return loss.mean() * 0.0
+
     def _apply_bottleneck_norm(self, latent: torch.Tensor) -> torch.Tensor:
         if getattr(self, "bottleneck_norm", None) is None:
             return latent
@@ -238,15 +354,38 @@ class MaskedAutoencoderViT(nn.Module):
         tok = tok.transpose(1, 2)                       # [N,L,D]
         return torch.cat([cls, tok], dim=1)
 
-    def forward(self, imgs, mask_ratio=0.75, file_name=""):
-        # Apply optional bottleneck normalization on latent tokens
-        latent, mask, ids_restore = self.forward_encoder(imgs, mask_ratio)
-        latent = self._apply_bottleneck_norm(latent) # add instanceNorm - Linzq25 - Mar 1st 2026
-        #save_path = "/home/uwm/maopuxu/MAE_Topography_Reconstruction/MAE-Topography/after_codes/latent_code"
-        if self.save_path != "" and file_name != "":
-            torch.save(latent, f'{self.save_path}/{file_name}_latent.pt')
-        pred = self.forward_decoder(latent, ids_restore)  # [N, L, p*p*3]
-        loss = self.forward_loss(imgs, pred, mask)
+    def forward(self, imgs, mask_ratio=0.75, file_name="", lcc_mask=None,
+                loss_on_lcc_only=False, lcc_priority=10.0,
+                lcc_mask_mode="none", lcc_patch_threshold=0.5):
+        """
+        lcc_mask_mode:
+          - "none"     : ignore lcc_mask and use random MAE masking
+          - "priority" : old behavior, fixed mask_ratio but prioritize LCC patches
+          - "exact"    : new real-bathymetry mode, mask exactly LCC patches;
+                         actual mask ratio varies by tile
+        """
+        if lcc_mask is not None and lcc_mask_mode == "exact":
+            pred, mask, lcc_patch = self.forward_lcc_exact(
+                imgs, lcc_mask=lcc_mask, lcc_patch_threshold=lcc_patch_threshold
+            )
+        else:
+            latent, mask, ids_restore, lcc_patch = self.forward_encoder(
+                imgs, mask_ratio,
+                lcc_mask=lcc_mask,
+                lcc_priority=lcc_priority,
+                lcc_mask_mode=lcc_mask_mode,
+                lcc_patch_threshold=lcc_patch_threshold,
+            )
+            latent = self._apply_bottleneck_norm(latent)
+            if self.save_path != "" and file_name != "":
+                torch.save(latent, f'{self.save_path}/{file_name}_latent.pt')
+            pred = self.forward_decoder(latent, ids_restore)  # [N, L, p*p*C]
+
+        loss = self.forward_loss(
+            imgs, pred, mask,
+            lcc_patch=lcc_patch,
+            loss_on_lcc_only=loss_on_lcc_only,
+        )
         return loss, pred, mask
         
 def mae_vit_base_patch16_dec512d8b(**kwargs):
