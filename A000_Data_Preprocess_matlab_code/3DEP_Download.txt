@@ -1,0 +1,58 @@
+# === 你的 UTM 边框（EPSG:6347）===
+XMIN=422500.500
+YMAX=4587999.500
+XMAX=422758.500
+YMIN=4587500.500
+
+# （可选）加一点缓冲，避免边缘缺瓦片（单位米）
+BUF=300
+XMINB=$(echo "$XMIN - $BUF" | bc -l)
+YMINB=$(echo "$YMIN - $BUF" | bc -l)
+XMAXB=$(echo "$XMAX + $BUF" | bc -l)
+YMAXB=$(echo "$YMAX + $BUF" | bc -l)
+
+# 生成四个角点（按 NW, NE, SE, SW）
+cat > utm_corners.txt <<EOF
+$XMINB $YMAXB
+$XMAXB $YMAXB
+$XMAXB $YMINB
+$XMINB $YMINB
+EOF
+
+# 用 gdaltransform 转坐标（需要 GDAL 已装）
+gdaltransform -s_srs EPSG:6339 -t_srs EPSG:4326 < utm_corners.txt > lonlat_corners.txt
+
+# 提取 bbox（minlon,minlat,maxlon,maxlat）
+read LON1 LAT1 _ <<< $(sed -n '1p' lonlat_corners.txt)
+read LON2 LAT2 _ <<< $(sed -n '2p' lonlat_corners.txt)
+read LON3 LAT3 _ <<< $(sed -n '3p' lonlat_corners.txt)
+read LON4 LAT4 _ <<< $(sed -n '4p' lonlat_corners.txt)
+
+MINLON=$(printf "%0.8f\n" $(echo "$LON1 $LON2 $LON3 $LON4" | tr ' ' '\n' | sort -n | head -1))
+MAXLON=$(printf "%0.8f\n" $(echo "$LON1 $LON2 $LON3 $LON4" | tr ' ' '\n' | sort -n | tail -1))
+MINLAT=$(printf "%0.8f\n" $(echo "$LAT1 $LAT2 $LAT3 $LAT4" | tr ' ' '\n' | sort -n | head -1))
+MAXLAT=$(printf "%0.8f\n" $(echo "$LAT1 $LAT2 $LAT3 $LAT4" | tr ' ' '\n' | sort -n | tail -1))
+
+echo "WGS84 bbox: $MINLON,$MINLAT,$MAXLON,$MAXLAT"
+
+# 查询 1 m DEM（GeoTIFF）
+curl -G 'https://tnmaccess.nationalmap.gov/api/v1/products' \
+  --data-urlencode 'datasets=Digital Elevation Model (DEM) 1 meter' \
+  --data-urlencode "bbox=${MINLON},${MINLAT},${MAXLON},${MAXLAT}" \
+  --data-urlencode 'prodFormats=GeoTIFF' \
+  --data-urlencode 'max=20000' \
+  -o query_1m.json
+
+
+# 抓所有 .tif/.tif.zip
+grep -oE 'https?://[^"]+\.tif(\.zip)?' query_1m.json > urls_1m.txt
+grep -oE '"url"\s*:\s*"https?://[^"]+\.tif(\.zip)?' query_1m.json \
+  | sed -E 's/^"url"\s*:\s*"//; s/"$//' >> urls_1m.txt
+sort -u urls_1m.txt -o urls_1m.txt
+
+wc -l urls_1m.txt
+sed -n '1,10p' urls_1m.txt
+
+mkdir -p DEM_1m_raw && cd DEM_1m_raw
+wget -c -i ../urls_1m.txt
+cd ..
