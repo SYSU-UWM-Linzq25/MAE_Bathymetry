@@ -436,6 +436,7 @@ def main():
     ap.add_argument("--norm_pix_loss", action="store_true")
     ap.add_argument("--tile_norm", action="store_true")
     ap.add_argument("--tile_norm_eps", type=float, default=1e-3)
+    ap.add_argument("--tile_norm_std_scale", type=float, default=1.0)
     ap.add_argument("--bottleneck_norm", default="none", choices=["none", "inst1d"])
     ap.add_argument("--loss_mode", default="mse", choices=["mse"])
     ap.add_argument("--postproc", default="none", choices=["none", "median", "histogram"])
@@ -471,6 +472,7 @@ def main():
         return_meta=True,
         tile_norm=args.tile_norm,
         tile_norm_eps=args.tile_norm_eps,
+        tile_norm_std_scale=args.tile_norm_std_scale,
     )
 
     loader = DataLoader(

@@ -5,7 +5,7 @@
 % 提取合适的中心点-超过80%的有效数据推导河道内
 % 根据会议讨论，后续会使用新的算法从LCC得到中心线和河宽
 
-% 首先构建vrt，然后全面检查nodata，摸清楚情况后，统一nodata
+% 首先bathy构建vrt，然后全面检查nodata，摸清楚情况后，统一nodata
 
 clear; clc;
 cd('/tank/data/SFS/xinyis/src/MEX_2.3.0'); GDALLoad();
@@ -127,6 +127,8 @@ fprintf('VRT built (merge only). VRT nodata(meta) = %g\n', nd_vrt);
 % 用A000_bathymetry_VRT_mergeOnly/fix_nd.sh在像元上修改，然后重新生成vrt
 % 其余的可以直接生成vrt
 
+% 进行补充，因为有一条河流是feet单位，需要进行转换
+
 clear; clc;
 cd('/tank/data/SFS/xinyis/src/MEX_2.3.0'); GDALLoad();
 addpath('/tank/data/SFS/xinyis/src/CREST_Prep');
@@ -213,73 +215,6 @@ for i = 1 : length(d)
     fprintf('写出角点：%s\n', fn);
 end
 
-% 下面这部分就不用了
-% %% milwaukee river 对应的tiff的3DEP的下载
-% 
-% % 读取范围
-% clear; clc;
-% cd('/tank/data/SFS/xinyis/src/MEX_2.3.0'); GDALLoad();
-% addpath('/tank/data/SFS/xinyis/src/CREST_Prep');
-% 
-% Folder = '/tank/data/SFS/xinyis/data/bathymetry/milwaukee_river_3DEP/';
-% 
-% Tifs = [
-%     dir(fullfile(Folder, '**', '*.tif'));
-%     dir(fullfile(Folder, '**', '*.vrt'));
-%     ];
-% 
-% Tifs = Tifs(~[Tifs.isdir]);
-% 
-% Output_folder = '/tank/data/SFS/xinyis/data/bathymetry/milwaukee_river_3DEP/LonLat_range/';
-% if exist(Output_folder,'dir') ~= 7
-%     mkdir(Output_folder);
-% end
-% 
-% for i = 1 : length(Tifs)
-% 
-%     Tiff_path = fullfile(Tifs(i).folder, Tifs(i).name);
-%     [~, baseName, ~] = fileparts(Tiff_path);   % baseName 就是不含 .tif 的名字
-% 
-%     [nbands,rows,cols,geoTrans,proj,dataType,nodataval]=RasterInfo(Tiff_path);
-% 
-%     % 找到坐标的范围
-%     [Lat0,Lon0]=RowCol2Proj(geoTrans,1,1);
-%     [Lat1,Lon1]=RowCol2Proj(geoTrans,rows,cols);
-% 
-%     XMIN_1 = min([Lon0 Lon1]);
-%     XMAX_1 = max([Lon0 Lon1]);
-%     YMIN_1 = min([Lat0 Lat1]);
-%     YMAX_1 = max([Lat0 Lat1]);
-% 
-%     if i == 1
-%         XMIN = XMIN_1;
-%         XMAX = XMAX_1;
-%         YMIN = YMIN_1;
-%         YMAX = YMAX_1;
-%     else
-%         XMIN = min([XMIN_1 XMIN]);
-%         XMAX = max([XMAX_1 XMAX]);
-%         YMIN = min([YMIN_1 YMIN]);
-%         YMAX = max([YMAX_1 YMAX]);
-%     end
-% 
-% end
-% 
-% % 写四角点（NW, NE, SE, SW），一行一个“X Y”
-% fn = fullfile(Output_folder,'utm_corners.txt');
-% fid = fopen(fn,'w');
-% fprintf(fid,'%.3f %.3f\n', XMIN, YMAX);  % NW
-% fprintf(fid,'%.3f %.3f\n', XMAX, YMAX);  % NE
-% fprintf(fid,'%.3f %.3f\n', XMAX, YMIN);  % SE
-% fprintf(fid,'%.3f %.3f\n', XMIN, YMIN);  % SW
-% fclose(fid);
-% 
-% fprintf('写出角点：%s\n', fn);
-
-
-
-
-
 %% 将3DEP的数据整理成vrt，并统一 nodata（不再追踪原始 nodata）
 % milwaukee部分的是整合成一个的milwaukee_river_3DEP/DEM_3DEP_1m.vrt
 
@@ -348,43 +283,7 @@ for i = 1 : length(d)
 end
 
 
-%% 进行resample和合并的操作
-% 第一步是将3DEP的先重采样到同bathmetry相同的网格
-
-% % 融合Bathmatry和3DEP
-% % 以前者为准
-% 
-% % 这一步先将3DEP的栅格重采样到bathmatry的栅格上面
-% 
-% % 首先进行投影和重采样
-% 
-% clear; clc;
-% cd('/tank/data/SFS/xinyis/src/MEX_2.3.0'); GDALLoad();
-% addpath('/tank/data/SFS/xinyis/src/CREST_Prep');
-% 
-% Folder = '/tank/data/SFS/xinyis/data/bathymetry/USGS_3DEP_bathymetry_DEM/';
-% d = dir(Folder);                 % 列出该目录下的所有条目
-% d = d([d.isdir]);                % 只保留文件夹
-% d(1:2) = [];
-% 
-% for i = 3 %:length(d)
-%     if contains(d(i).name,'MD_PotomacRiver') || contains(d(i).name,'NoNeed')
-%         continue
-%     end
-% 
-%     bathy_vrt = fullfile([Folder,d(i).name,'/Bathy.vrt']);
-%     dep3_vrt = fullfile([Folder,d(i).name,'/DEM_1m_raw/DEM_3DEP_1m.vrt']);
-%     dstFile = fullfile([Folder,d(i).name,'/DEM_1m_raw/DEM_1m_Proj_3.vrt']);
-% 
-%     [~,rows,cols,geoTrans,proj,~,~]=RasterInfo(bathy_vrt);
-% 
-%     ResampleAndClip(geoTrans, proj, cols,...
-%         rows, dep3_vrt, dstFile, 'VRT', 1, 2); % use 2 Bilinear
-% 
-%     clear bathy_vrt dep3_vrt dstFile
-%     clear geoTrans proj cols rows
-%     disp([num2str(i),' 3DEP vrt Resampleandclip is done'])
-% end
+%% 第一步是将3DEP的先重采样到同bathmetry相同的网格
 
 % 对于3号而言resampleandclip的速度非常慢，所以尝试用分块的方法提速
 % 但是要验证和之前的结果是否相同
@@ -496,149 +395,6 @@ disp('geoTrans bathy vs dem:'); disp([gB(:) gD(:)]);
 fprintf('proj same? %d\n', strcmp(pB,pD));
 
 
-% % MIlwaukee River
-% clear; clc;
-% cd('/tank/data/SFS/xinyis/src/MEX_2.3.0'); GDALLoad();
-% addpath('/tank/data/SFS/xinyis/src/CREST_Prep');
-% 
-% Folder = '/tank/data/SFS/xinyis/data/bathymetry/USGS_3DEP_bathymetry_DEM/milwaukee_river_3DEP/';
-% OutFolder = [Folder,'/3DEP_Resampleandclip/'];
-% if exist(OutFolder,'dir') ~= 7
-%     mkdir(OutFolder);
-% end
-% 
-% Tifs = [
-%     dir(fullfile(Folder, '*.tif'));
-%     dir(fullfile(Folder, '*.vrt'));
-%     ];
-% 
-% Tifs = Tifs(~[Tifs.isdir]);
-% dep3_vrt = fullfile([Folder,'/DEM_1m_raw/DEM_3DEP_1m.vrt']);
-% 
-% globalND = -3.4028235e+38;   % 和 Bathy 那边保持一致
-% 
-% for i = 1 : length(Tifs)
-%     if strcmpi(Tifs(i).name,'Kletzch_proj.tif') || strcmpi(Tifs(i).name,'UpMax3Null.tif')
-%         continue
-%     end
-% 
-%     bathy_vrt = fullfile([Folder,Tifs(i).name]);
-%     [~, baseName, ~] = fileparts(bathy_vrt);   % baseName 就是不含 .tif 的名字
-%     dstfolder = fullfile([OutFolder,baseName]);
-%     if exist(dstfolder,'dir') ~= 7
-%         mkdir(dstfolder);
-%     end
-% 
-%     dstFile = fullfile([dstfolder,'/DEM_1m_ResampleandClip.vrt']);
-% 
-%     [~,rows,cols,geoTrans,proj,~,~]=RasterInfo(bathy_vrt);
-% 
-%     % 已有：geoTrans, proj(WKT), cols, rows, dep3_vrt, dstFile
-%     xmin = geoTrans(1);
-%     xres = geoTrans(2);      % 正
-%     ymax = geoTrans(4);
-%     yres = geoTrans(6);      % 负
-%     xmax = xmin + cols * xres;
-%     ymin = ymax + rows * yres;
-% 
-%     % 用单引号包住 WKT（注意 MATLAB 里单引号要写成两个：''）
-%     proj_arg = sprintf('''%s''', proj);
-% 
-%     % 像元分辨率（与 bathy 一致），-tap 需要 -tr
-%     tr_arg = sprintf('-tr %.10f %.10f', xres, abs(yres));
-% 
-%     % 如果你知道真实 nodata 就填；不确定可以先删这两个参数
-%     srcnodata = globalND; dstnodata = globalND;
-% 
-%     cmd = sprintf([ ...
-%         'gdalwarp -of VRT -r bilinear -multi -wo NUM_THREADS=ALL_CPUS -wm 2048 ' ...
-%         '-t_srs %s -te_srs %s %s -te %.10f %.10f %.10f %.10f -tap ' ...
-%         '-srcnodata %g -dstnodata %g -wo INIT_DEST=NO_DATA -wo SKIP_NOSOURCE=YES -overwrite ' ...
-%         '"%s" "%s"' ], ...
-%         proj_arg, proj_arg, tr_arg, ...
-%         xmin, ymin, xmax, ymax, ...
-%         srcnodata, dstnodata, dep3_vrt, dstFile);
-% 
-%     status = system(cmd);
-%     if status ~= 0
-%         error('gdalwarp 生成 VRT 失败（检查 WKT 引号、-tr/-tap、nodata）。');
-%     end
-% 
-%     disp([num2str(i),' 3DEP vrt Resampleandclip is done'])
-% end
-% 
-
-% % 进行验证
-% clear;clc;
-% 
-% ResampleResults = '/tank/data/SFS/xinyis/data/bathymetry/USGS_3DEP_bathymetry_DEM/OR_SantiamRiverTB_Topobathy_1_D23/DEM_1m_raw/DEM_1m_Proj.vrt';
-% gdalwarpResults = '/tank/data/SFS/xinyis/data/bathymetry/USGS_3DEP_bathymetry_DEM/OR_SantiamRiverTB_Topobathy_1_D23/DEM_1m_raw/DEM_1m_ResampleandClip.vrt';
-% 
-% % ==== 读取基础信息 ====
-% [nb1, rows1, cols1, g1, p1, dt1, nd1] = RasterInfo(ResampleResults);
-% [nb2, rows2, cols2, g2, p2, dt2, nd2] = RasterInfo(gdalwarpResults);
-% 
-% % 基本一致性快速检查
-% assert(rows1==rows2 && cols1==cols2, '行列不一致：rows/cols');
-% if ~strcmp(p1, p2)
-%     warning('投影 WKT 不一致（可能仍然配准一致，但建议检查）');
-% end
-% if any(abs([g1(1)-g2(1), g1(2)-g2(2), g1(4)-g2(4), g1(6)-g2(6)]) > 1e-9)
-%     warning('GeoTransform 不完全一致（像元对齐可能有差异）');
-% end
-% 
-% tileW = 1000;           % tile 的边长（像元）
-% Nsamples = 10;          % 抽样次数
-% tol = 1e-6;             % 数值容差（双线性/线程差异可适当放大，如1e-4）
-% rng('shuffle');
-% 
-% % 防止 tile 超出边界
-% maxRow0 = rows1 - tileW;
-% maxCol0 = cols1 - tileW;
-% assert(maxRow0 > 0 && maxCol0 > 0, 'tileW 超出影像尺寸');
-% 
-% for k = 1:Nsamples
-%     % 随机左上角（行列索引，1-based）
-%     row0 = randi([1, maxRow0]);
-%     col0 = randi([1, maxCol0]);
-% 
-%     % 读取各自 tile（注意 ReadRaster 的参数顺序：列、行、宽、高）
-%     t1 = ReadRaster(ResampleResults,row0, col0, tileW, tileW);
-%     t2 = ReadRaster(gdalwarpResults, row0, col0, tileW, tileW);
-% 
-%     % 转 double 计算
-%     t1 = double(t1);
-%     t2 = double(t2);
-%     t1_line = reshape(t1,[],1);
-%     t2_line = reshape(t2,[],1);
-% 
-%     vaild = find(~isnan(t1_line));
-%     noSame = find(t1_line(vaild) ~= t2_line(vaild));
-% 
-%     if ~isempty(noSame)
-%         disp(['Total have ',num2str(length(noSame)),' grids are different!'])
-% 
-%         if length(noSame) > 10
-%             for j = 1 : 10
-%                 disp(['ResampleResults: ',num2str(t1_line(noSame(j)))])
-%                 disp(['gdalwarpResults: ',num2str(t2_line(noSame(j)))])
-%             end
-%         else
-%             for j = 1 : length(noSame)
-%                 disp(['ResampleResults: ',num2str(t1_line(noSame(j)))])
-%                 disp(['gdalwarpResults: ',num2str(t2_line(noSame(j)))])
-%             end
-%         end
-% 
-%     else
-%         disp('No different!')
-%     end
-% 
-% end
-
-
-
-
 %% 将3DEP同bathyj进行融合
 % 对任意一个像元 (x, y)：
 
@@ -652,97 +408,6 @@ fprintf('proj same? %d\n', strcmp(pB,pD));
 % → Combined_Bathy_Priority(x,y) = globalND。
 
 % 必须使用像元计算，然后保存为tiff，最后再输出成vrt（可选）
-
-%% ====== 合并 bathy + 3DEP：bathy 优先，用 3DEP 补洞，输出 TIF ======
-% clear; clc;
-% cd('/tank/data/SFS/xinyis/src/MEX_2.3.0'); GDALLoad();
-% addpath('/tank/data/SFS/xinyis/src/CREST_Prep');
-% 
-% % ------ 1) 先对单条河测试 ------
-% name = 'Kletzch_Combined_UpMax3Null';   % 改成你要合并的子目录名
-% 
-% Folder_bathy = '/tank/data/SFS/xinyis/data/bathymetry/Processed_Results/Bathy_1m_FixND/';
-% Folder_dem   = '/tank/data/SFS/xinyis/data/bathymetry/Processed_Results/3DEP_1m_ResampleClip/';
-% OutFolder    = '/tank/data/SFS/xinyis/data/bathymetry/Processed_Results/Bathy3DEP_Merged_Tiff_1m/';
-% 
-% if exist(OutFolder,'dir') ~= 7
-%     mkdir(OutFolder);
-% end
-% 
-% bathy_vrt = fullfile(Folder_bathy, name, 'Bathy_1m.vrt');
-% dem_vrt   = fullfile(Folder_dem,   name, 'DEM_3DEP_1m_ResampleandClip.vrt');
-% outTif    = fullfile(OutFolder, [name '_Merged_1m.tif']);
-% 
-% assert(exist(bathy_vrt,'file')==2, 'Bathy_1m.vrt not found');
-% assert(exist(dem_vrt,'file')  ==2, 'DEM_3DEP_1m_ResampleandClip.vrt not found');
-% 
-% % 如果已经有旧的结果，先删掉，防止残留
-% if exist(outTif,'file') == 2
-%     delete(outTif);
-% end
-% 
-% % ------ 2) 用 bathy 的空间参考作为“母版” ------
-% [~, rows, cols, geoTrans, proj, dataType_bathy, nodataval] = RasterInfo(bathy_vrt);
-% fprintf('Bathy size: rows=%d, cols=%d\n', rows, cols);
-% 
-% % 统一的 nodata（你已经在前面所有数据中统一过）
-% globalND = -999999;   % 统一的 NoData
-% 
-% % ------ 3) 分块读写设置 ------
-% tile = 2048;    % 可调；内存充足可以 4096 甚至更大
-% totalTiles = ceil(rows/tile) * ceil(cols/tile);
-% tileCount  = 0;
-% 
-% fprintf('Start merging %s ...\n', name);
-% 
-% for rLocal = 1:tile:rows
-%     rr = min(tile, rows - rLocal + 1);
-%     for cLocal = 1:tile:cols
-%         cc = min(tile, cols - cLocal + 1);
-% 
-%         % ★ 这里没有子窗口，所以绝对行/列就是 rLocal/cLocal
-%         absRow = rLocal;
-%         absCol = cLocal;
-% 
-%         % ------ 4) 分块读取 bathy / 3DEP ------
-%         B = double(ReadRaster(bathy_vrt, absRow, absCol, rr, cc));
-%         D = double(ReadRaster(dem_vrt,   absRow, absCol, rr, cc));
-% 
-%         % 这里的融合读取还是出现问题，写出很容易就得到一个非常小的填充值
-%         % ------ 6) 按规则合并：bathy优先，bathy洞用3DEP补 ------
-%         C = B;
-% 
-%         isHoleB  = isnan(B) | (B == globalND);
-%         isValidD = isfinite(D) & ~isnan(D) & (D ~= globalND); % 3DEP有效的地方
-% 
-%         mask_fill = isHoleB & isValidD;
-%         C(mask_fill) = D(mask_fill);
-% 
-%         C(~isfinite(C) | isnan(C) | (C == globalND)) = globalND;
-% 
-%         % ------ 7) 分块写入输出 TIF ------
-%         % 注意 geoTrans 是整幅图的仿射；rows/cols 也是全图大小
-%         WriteRaster(outTif, C, geoTrans, proj, dataType_bathy, ...
-%                     'GTiff', globalND, ...
-%                     rLocal, cLocal, rows, cols);
-%         % WriteRaster(outTif, C, geoTrans, proj, dataType_bathy, ...
-%         %             'GTiff', nodataval);
-% 
-%         % 输出用于验证的
-%         subgeoTrans = subTranscoef(geoTrans,absRow,absCol);
-%         WriteRaster(outTif1, C, subgeoTrans, proj, dataType_bathy, 'GTiff', nodataval); % 融合后的结果
-%         WriteRaster(outTif2, B, subgeoTrans, proj, dataType_bathy, 'GTiff', nodataval); % 融合前的bathy
-%         WriteRaster(outTif3, D, subgeoTrans, proj, dataType_bathy, 'GTiff', nodataval); % 融合前的3DEP
-% 
-%         % ------ 8) 进度信息 ------
-%         tileCount = tileCount + 1;
-%         fprintf('\rProgress: %6.2f%%  (%d/%d)', ...
-%             100*tileCount/totalTiles, tileCount, totalTiles);
-% 
-%         clear B D C mask_fill
-%     end
-% end
-% fprintf('\nDone. Output = %s\n', outTif);
 
 
 %% ====== Batch merge bathy + 3DEP (bathy priority, DEM fill holes) ======
@@ -908,59 +573,6 @@ for iRiver = 1:numel(d)
 end
 
 fprintf('\nALL RIVERS DONE.\n');
-
-
-
-%%% 原来合并的操作
-% % Milwaukee
-% 
-% clear; clc;
-% cd('/tank/data/SFS/xinyis/src/MEX_2.3.0'); GDALLoad();
-% addpath('/tank/data/SFS/xinyis/src/CREST_Prep');
-% 
-% Folder = '/tank/data/SFS/xinyis/data/bathymetry/USGS_3DEP_bathymetry_DEM/milwaukee_river_3DEP/';
-% ResampleFolder = '/tank/data/SFS/xinyis/data/bathymetry/USGS_3DEP_bathymetry_DEM/milwaukee_river_3DEP/3DEP_Resampleandclip/';
-% OutFolder = '/tank/data/SFS/xinyis/data/bathymetry/Processed_Results/Bathy_Merge_3DEP_1m/';
-% if exist(OutFolder,'dir') ~= 7
-%     mkdir(OutFolder);
-% end
-% 
-% Tifs = [
-%     dir(fullfile(Folder, '*.tif'));
-%     dir(fullfile(Folder, '*.vrt'));
-%     ];
-% 
-% Tifs = Tifs(~[Tifs.isdir]);
-% 
-% for i = 1 : length(Tifs)
-%     if strcmpi(Tifs(i).name,'Kletzch_proj.tif') || strcmpi(Tifs(i).name,'UpMax3Null.tif') 
-%         continue
-%     end
-% 
-%     bathy_vrt = fullfile([Folder,Tifs(i).name]);
-%     [~, baseName, ~] = fileparts(bathy_vrt);   % baseName 就是不含 .tif 的名字
-% 
-%     dep3_Resample = fullfile([ResampleFolder,baseName,'/DEM_1m_ResampleandClip.vrt']);
-% 
-%     dstfolder = fullfile([OutFolder,baseName]);
-%     if exist(dstfolder,'dir') ~= 7
-%         mkdir(dstfolder);
-%     end
-%     dstFile = fullfile([dstfolder,'/Combined_Bathy_Priority.vrt']);
-% 
-%     cd(Folder)
-%     lst = tempname; fid = fopen(lst,'w');
-%     fprintf(fid, '%s\n', dep3_Resample);   % 先 3DEP
-%     fprintf(fid, '%s\n', bathy_vrt);  % 后 Bathy（优先）
-%     fclose(fid);
-% 
-%     cmd = sprintf(['gdalbuildvrt -overwrite -resolution highest -r bilinear -hidenodata ' ...
-%         '-input_file_list "%s" "%s"'], lst, dstFile);
-%     assert(system(cmd)==0, 'gdalbuildvrt failed');
-% 
-%     disp([num2str(i),' 3DEP merge Bathy is done'])
-% end
-
 
 %% 2025年11月23日
 % 将之前处理的结果进行升尺度

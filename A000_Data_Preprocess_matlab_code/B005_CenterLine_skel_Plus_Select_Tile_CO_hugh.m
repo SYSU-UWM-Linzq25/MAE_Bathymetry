@@ -16,7 +16,7 @@ d = dir(Folder);                 % 列出该目录下的所有条目
 d = d([d.isdir]);                % 只保留文件夹
 d(1:2) = [];
 
-for i = 5 %:length(d)
+for i = 3
     BasinName = d(i).name;
 
     fprintf('\n========== Start basin: %s ==========\n', BasinName);
@@ -42,15 +42,7 @@ for i = 5 %:length(d)
     bathy_vrt_10m = fullfile(rootPR, 'Bathy_10m_FixND', BasinName, 'Bathy_10m.vrt');
 
     % LCC (1/3/5/10 m)
-    % LCC_vrt_1m  = fullfile(rootPR, 'LCC_1m',  BasinName, 'ESA_WorldCover_Resampleandclip_1m.vrt');
-
-    % Simple final prediction mask
-    % 1 = prediction / masked region
-    % 0 = known region
-    LCC_vrt_1m  = fullfile(rootPR, 'PredictionMask_LCCBathyValid_1m', ...
-        BasinName, 'MAE_PredictionMask_1m.vrt');
-
-    % LCC 3/5/10m 暂时不用，先保留旧路径即可
+    LCC_vrt_1m  = fullfile(rootPR, 'LCC_1m',  BasinName, 'ESA_WorldCover_Resampleandclip_1m.vrt');
     LCC_vrt_3m  = fullfile(rootPR, 'LCC_3m',  BasinName, 'ESA_WorldCover_Resampleandclip_3m.vrt');
     LCC_vrt_5m  = fullfile(rootPR, 'LCC_5m',  BasinName, 'ESA_WorldCover_Resampleandclip_5m.vrt');
     LCC_vrt_10m = fullfile(rootPR, 'LCC_10m', BasinName, 'ESA_WorldCover_Resampleandclip_10m.vrt');
@@ -64,7 +56,7 @@ for i = 5 %:length(d)
         mkdir(TempFolder);
     end
 
-    OutFolder  = fullfile(rootPR, 'Tiles_for_MAE');
+    OutFolder  = fullfile(rootPR, 'Tiles_for_MAE_CO');
     if exist(OutFolder,'dir') ~= 7
         mkdir(OutFolder);
     end

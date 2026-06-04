@@ -345,7 +345,10 @@ def get_args_parser():
                         help='Apply tile-wise mean/std normalization in dataset preprocessing.')
     parser.add_argument('--tile_norm_eps', default=1e-3, type=float,
                         help='Minimum std used in tile-wise normalization.')
-                    
+    parser.add_argument('--tile_norm_std_scale', default=1.0, type=float,
+                        help='Scale factor multiplied to tile std in tile-wise normalization. '
+                             'Use >1, e.g. 1.5, to enlarge the normalization range.')                   
+                             
     parser.add_argument('--bottleneck_norm', default='none', choices=['none', 'inst1d'])
     parser.add_argument('--loss_mode', default='mse', choices=['mse'])
 
@@ -607,8 +610,15 @@ def main(args):
     if use_lcc and args.lcc_mask_mode == 'none':
         print('[WARN] LCC masks are provided but --lcc_mask_mode none; masks will be loaded but ignored by the model.')
     if use_lcc:
-        print(f'[DATA] Using paired DEM/bathy + LCC masks. mode={args.lcc_mask_mode}, visible_tile_norm={args.tile_norm_visible_only}')
-
+        print(
+            f'[DATA] Using paired DEM/bathy + LCC masks. '
+            f'mode={args.lcc_mask_mode}, '
+            f'tile_norm={args.tile_norm}, '
+            f'tile_norm_visible_only={args.tile_norm_visible_only}, '
+            f'tile_norm_std_scale={args.tile_norm_std_scale}, '
+            f'tile_norm_eps={args.tile_norm_eps}'
+        )
+        
     def _make_dataset(split_name: str, random_flip: bool, return_path: bool):
         dem_dir = {'train': train_dir, 'val': val_dir, 'test': test_dir}[split_name]
         dem_list = getattr(args, f'{split_name}_list')
@@ -625,6 +635,7 @@ def main(args):
                 return_path=return_path,
                 tile_norm=args.tile_norm,
                 tile_norm_eps=args.tile_norm_eps,
+                tile_norm_std_scale=args.tile_norm_std_scale,
                 return_meta=True,
                 tile_norm_visible_only=args.tile_norm_visible_only,
                 min_lcc_patch_ratio=args.min_lcc_patch_ratio,
@@ -641,6 +652,7 @@ def main(args):
             return_path=return_path,
             tile_norm=args.tile_norm,
             tile_norm_eps=args.tile_norm_eps,
+            tile_norm_std_scale=args.tile_norm_std_scale,
             return_meta=True,
         )
 
@@ -1030,6 +1042,7 @@ def main(args):
                 return_path=False,
                 tile_norm=args.tile_norm,
                 tile_norm_eps=args.tile_norm_eps,
+                tile_norm_std_scale=args.tile_norm_std_scale,
                 return_meta=True,
                 tile_norm_visible_only=args.tile_norm_visible_only,
                 min_lcc_patch_ratio=args.min_lcc_patch_ratio,
@@ -1047,6 +1060,7 @@ def main(args):
                 return_path=False,
                 tile_norm=args.tile_norm,
                 tile_norm_eps=args.tile_norm_eps,
+                tile_norm_std_scale=args.tile_norm_std_scale,
                 return_meta=True,
             )
         # apply same TRAIN normalization

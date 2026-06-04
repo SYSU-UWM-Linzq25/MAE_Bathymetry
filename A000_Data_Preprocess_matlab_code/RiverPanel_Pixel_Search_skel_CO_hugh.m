@@ -1,4 +1,4 @@
-function RiverPanel_Pixel_Search_skel(bathy_vrt_1m,bathy_vrt_3m,bathy_vrt_5m,bathy_vrt_10m, ...
+function RiverPanel_Pixel_Search_skel_CO_hugh(bathy_vrt_1m,bathy_vrt_3m,bathy_vrt_5m,bathy_vrt_10m, ...
     final_mix_vrt_1m,final_mix_vrt_3m,final_mix_vrt_5m,final_mix_vrt_10m, ...
     LCC_vrt_1m,LCC_vrt_3m,LCC_vrt_5m,LCC_vrt_10m, ...
     srcLine,ExtractPercent,winH,winW,TempFolder,OutFolder,BasinName)
@@ -13,30 +13,30 @@ function RiverPanel_Pixel_Search_skel(bathy_vrt_1m,bathy_vrt_3m,bathy_vrt_5m,bat
 
 % %% 测试
 % clear;clc;
-% 
+%
 % final_mix_vrt_1m = '/tank/data/SFS/xinyis/data/bathymetry/Processed_Results/Bathy3DEP_Merged_Tiff_1m/Kletzch_Combined_UpMax3Null/Combined_Bathy_Priority_1m.vrt';
 % final_mix_vrt_3m = '/tank/data/SFS/xinyis/data/bathymetry/Processed_Results/Bathy3DEP_Merged_Tiff_3m/Kletzch_Combined_UpMax3Null/Combined_Bathy_Priority_3m.tif';
 % final_mix_vrt_5m = '/tank/data/SFS/xinyis/data/bathymetry/Processed_Results/Bathy3DEP_Merged_Tiff_5m/Kletzch_Combined_UpMax3Null/Combined_Bathy_Priority_5m.tif';
 % final_mix_vrt_10m = '/tank/data/SFS/xinyis/data/bathymetry/Processed_Results/Bathy3DEP_Merged_Tiff_10m/Kletzch_Combined_UpMax3Null/Combined_Bathy_Priority_10m.tif';
-% 
+%
 % bathy_vrt_1m = '/tank/data/SFS/xinyis/data/bathymetry/Processed_Results/Bathy_1m_FixND/Kletzch_Combined_UpMax3Null/Bathy_1m.vrt';
 % bathy_vrt_3m = '/tank/data/SFS/xinyis/data/bathymetry/Processed_Results/Bathy_3m_FixND/Kletzch_Combined_UpMax3Null/Bathy_3m.vrt';
 % bathy_vrt_5m = '/tank/data/SFS/xinyis/data/bathymetry/Processed_Results/Bathy_5m_FixND/Kletzch_Combined_UpMax3Null/Bathy_5m.vrt';
 % bathy_vrt_10m = '/tank/data/SFS/xinyis/data/bathymetry/Processed_Results/Bathy_10m_FixND/Kletzch_Combined_UpMax3Null/Bathy_10m.vrt';
-% 
+%
 % LCC_vrt_1m = '/tank/data/SFS/xinyis/data/bathymetry/Processed_Results/LCC_1m/Kletzch_Combined_UpMax3Null/ESA_WorldCover_Resampleandclip_1m.vrt';
 % LCC_vrt_3m = '/tank/data/SFS/xinyis/data/bathymetry/Processed_Results/LCC_3m/Kletzch_Combined_UpMax3Null/ESA_WorldCover_Resampleandclip_3m.vrt';
 % LCC_vrt_5m = '/tank/data/SFS/xinyis/data/bathymetry/Processed_Results/LCC_5m/Kletzch_Combined_UpMax3Null/ESA_WorldCover_Resampleandclip_5m.vrt';
 % LCC_vrt_10m = '/tank/data/SFS/xinyis/data/bathymetry/Processed_Results/LCC_10m/Kletzch_Combined_UpMax3Null/ESA_WorldCover_Resampleandclip_10m.vrt';
-% 
+%
 % srcLine = '/tank/data/SFS/xinyis/data/bathymetry/Processed_Results/CenterRiverLine_skel/Reproj/Kletzch_Combined_UpMax3Null/ESA_WorldCover_Width_proj.shp';
 % ExtractPercent = 0.7;
 % TempFolder = '/tank/data/SFS/xinyis/data/bathymetry/Processed_Results/CenterRiverLine_skel/Sample_Extract/Kletzch_Combined_UpMax3Null/';
 % BasinName = 'Kletzch_Combined_UpMax3Null';
-% 
+%
 % winH = 336;   % 行数（高度）
 % winW = 336;   % 列数（宽度）
-% 
+%
 % OutFolder = '/tank/data/SFS/xinyis/data/bathymetry/Processed_Results/Tiles_for_MAE_Test/';
 
 if exist(OutFolder,'dir') ~= 7
@@ -56,7 +56,7 @@ disp('Step1: Srcline Points Sample Extraction')
 GT = shaperead(srcLine);
 
 % 抽样比例（比如 10%）
-sampleRate = ExtractPercent;        
+sampleRate = ExtractPercent;
 rng(2025);               % 固定随机种子，结果可复现
 
 nPts    = numel(GT);
@@ -67,16 +67,16 @@ keep = false(nPts,1);
 
 for k = 1:numel(uLID)
     idx = find(allLID == uLID(k));     % 这一条流线上的所有点
-    
+
     % 这一条线内部做等概率抽样
     r = rand(numel(idx),1);
     lineKeep = r < sampleRate;
-    
+
     % 保护：保证每条线至少有 1 个点被抽到
     if ~any(lineKeep)
         lineKeep(randi(numel(idx))) = true;
     end
-    
+
     keep(idx) = lineKeep;
 end
 
@@ -111,24 +111,24 @@ LID(nanMask)   = [];
 Width(nanMask) = [];
 
 P = table(Xs, Ys, LID, Width, ...
-          'VariableNames', {'X','Y','LineID','Width'});
+    'VariableNames', {'X','Y','LineID','Width'});
 
 %% 可选部分，提取Fac
 
 % % 根据这个的shp的point进行进一步的筛选
 % % 读取FAC进行一个筛选判断
-% 
+%
 % fac = '/tank/data/SFS/xinyis/data/bathymetry/USGS_3DEP_bathymetry_DEM/MD_PotomacRiver_Bathy_2019/NHDPlusV21_Data_Process/Range_fac_Proj.tif';
 % [~,~,~,geoTrans,~,~,nodataval]=RasterInfo(fac);
-% 
+%
 % % 预分配
 % P.fac = nan(height(P), 1);
-% 
+%
 % for i = 1 : height(P)
 %     Points_Lon = P.X(i);
 %     Points_Lat = P.Y(i);
 %     [row0,col0]=Proj2RowCol(geoTrans,Points_Lat,Points_Lon);
-% 
+%
 %     % 读取 1x1 像元窗口（按你当前函数的参数顺序）
 %     fac_Point = ReadRaster(fac,row0,col0,1,1); % 读取这个点的fac
 %     % NoData 处理
@@ -202,7 +202,7 @@ for j = 1:length(targetRes)
     var2 = ['bathamtry_Grid_Ratio'      suffix];
     var3 = ['bathamtry_ValidGrid_num'   suffix];
     var4 = ['bathamtry_ValidGrid_Ratio' suffix];
-    
+
     % 预分配列（每个分辨率对应自己的一组列）
     P.(var1) = nan(height(P), 1);
     P.(var2) = nan(height(P), 1);
@@ -237,18 +237,26 @@ for j = 1:length(targetRes)
         end
 
         % 读取 这个tile的bathmatry
-        tile = ReadRaster(bathy_vrt, r1, c1, h, w);
-        tile_LCC = ReadRaster(LCC_vrt, r1, c1, h, w);
+        tile = double(ReadRaster(bathy_vrt, r1, c1, h, w));
+        tile_LCC_raw = double(ReadRaster(LCC_vrt, r1, c1, h, w));
         tileBathmatry3DEP = ReadRaster(final_mix_vrt, r1, c1, h, w);
 
-        % 检验有效数据（原始 bathy）
-        k_valid = find(~isnan(tile));
+        % bathy 有效区
+        bathy_valid = isfinite(tile) & ~isnan(tile) & ...
+            (tile ~= -999999) & (tile > -1e20);
+
+        % simple final mask:
+        % 1 = 需要预测
+        % 0 = 不预测
+        tile_finalMask = (tile_LCC_raw == 1) & bathy_valid;
+
+        k_valid = find(bathy_valid);
         P.(var1)(i) = numel(k_valid);
         P.(var2)(i) = numel(k_valid) / (h * w);
 
         tileBathmatry3DEP_outRiver = tileBathmatry3DEP;
-        tileBathmatry3DEP_outRiver(tile_LCC==1) = nan; % LCC已经转换成了01的mask
-        
+        tileBathmatry3DEP_outRiver(tile_finalMask == 1) = nan;
+
         k_valid_OutRiver = find(~isnan(tileBathmatry3DEP_outRiver));
         P.(var3)(i) = length(k_valid_OutRiver);
         P.(var4)(i) = length(k_valid_OutRiver)/(h*w);
@@ -256,8 +264,8 @@ for j = 1:length(targetRes)
         fprintf('Res = %dm: %d bathymetry extraction is done!\n', res, i);
 
         clear Points_Lon Points_Lat row0 col0 r1 c1 r2 c2 h w ...
-              tile tile_LCC tile_3DEP tile_3DEP_inRiver ...
-              k_valid k_valid_inRiver
+            tile tile_LCC tile_3DEP tile_3DEP_inRiver ...
+            k_valid k_valid_inRiver
     end
 end
 
@@ -348,8 +356,8 @@ nP = height(P);
 
 % 1. 主河道筛选：1m 的 Grid_Ratio >= 20%
 maskMain = isfinite(P.bathamtry_Grid_Ratio_1m) & ...
-           ~isnan(P.bathamtry_Grid_Ratio_1m) & ...
-           P.bathamtry_Grid_Ratio_1m >= 0.20;   % 大于等于 20%
+    ~isnan(P.bathamtry_Grid_Ratio_1m) & ...
+    P.bathamtry_Grid_Ratio_1m >= 0.20;   % 大于等于 20%
 
 % 也可以先得到主河道子集
 % P_main = P(maskMain, :);
@@ -374,10 +382,10 @@ for r = targetRes
 
     % 条件：主河道 + 有效比率 > 80%（如果你仍然想排除 1，可以加 < 1 条件）
     maskValid_r = maskMain & ...
-                  isfinite(P.(varValidRatio)) & ...
-                  ~isnan(P.(varValidRatio)) & ...
-                  P.(varValidRatio) > 0.80 & ...
-                  P.(varValidRatio) < 1.0;   % 如果不想排除全 1，可以去掉这一条
+        isfinite(P.(varValidRatio)) & ...
+        ~isnan(P.(varValidRatio)) & ...
+        P.(varValidRatio) > 0.80 & ...
+        P.(varValidRatio) < 1.0;   % 如果不想排除全 1，可以去掉这一条
 
     % 满足条件的位置标记为 1
     P.(flagName)(maskValid_r) = 1;
@@ -407,7 +415,7 @@ if ~ismember('PointID', P_select.Properties.VariableNames)
 end
 
 fprintf('共有 %d/%d 个点在至少一个分辨率下有效。\n', ...
-        sum(maskAnyValid), nP);
+    sum(maskAnyValid), nP);
 
 %% 生成符合条件的点
 %% Step4: 按 BestRes 分辨率分别输出 shp
@@ -524,15 +532,19 @@ for r = targetRes
     switch r
         case 1
             final_mix_vrt = final_mix_vrt_1m;
+            bathy_vrt     = bathy_vrt_1m;
             LCC_vrt       = LCC_vrt_1m;
         case 3
             final_mix_vrt = final_mix_vrt_3m;
+            bathy_vrt     = bathy_vrt_3m;
             LCC_vrt       = LCC_vrt_3m;
         case 5
             final_mix_vrt = final_mix_vrt_5m;
+            bathy_vrt     = bathy_vrt_5m;
             LCC_vrt       = LCC_vrt_5m;
         case 10
             final_mix_vrt = final_mix_vrt_10m;
+            bathy_vrt     = bathy_vrt_10m;
             LCC_vrt       = LCC_vrt_10m;
         otherwise
             warning('未知分辨率 %d m，跳过。', r);
@@ -560,18 +572,19 @@ for r = targetRes
 
     % ---- 4. 读取该分辨率的基本信息 ----
     clear rowsF colsF rowsL colsL rows cols geoTrans proj dataType nodataval
+
     [~, rowsF, colsF, geoTrans, proj, dataType, nodataval] = RasterInfo(final_mix_vrt);
+    [~, rowsB, colsB, ~,       ~,    ~,        ~         ] = RasterInfo(bathy_vrt);
     [~, rowsL, colsL, ~,       ~,    ~,        ~         ] = RasterInfo(LCC_vrt);
+
+    if rowsF ~= rowsB || colsF ~= colsB || rowsF ~= rowsL || colsF ~= colsL
+        error('Grid size mismatch for %s %dm tile output: final=%d/%d, bathy=%d/%d, mask=%d/%d', ...
+            BasinName, r, rowsF, colsF, rowsB, colsB, rowsL, colsL);
+    end
 
     % % 以两者的交集作为安全范围
     % rows = min([rowsF, rowsL]);
     % cols = min([colsF, colsL]);
-
-    if rowsF ~= rowsL || colsF ~= colsL
-        error('Grid size mismatch for %s %dm tile output: final=%d/%d, mask=%d/%d', ...
-            BasinName, r, rowsF, colsF, rowsL, colsL);
-    end
-
     rows = rowsF;
     cols = colsF;
 
@@ -601,12 +614,22 @@ for r = targetRes
         % end
 
         % ---- 读取这个 tile 的数据 ----
-        tile_LCC         = ReadRaster(LCC_vrt,       r1, c1, h, w);
+        tile_bathy = double(ReadRaster(bathy_vrt, r1, c1, h, w));
+        tile_LCC_raw = double(ReadRaster(LCC_vrt, r1, c1, h, w));
         tileBathmatry3DEP = ReadRaster(final_mix_vrt, r1, c1, h, w);
 
-        % 只保留河道内（LCC == 80 为水体，这里按你之前逻辑：80 外为 NaN）
+        % bathy 有效区
+        bathy_valid = isfinite(tile_bathy) & ~isnan(tile_bathy) & ...
+            (tile_bathy ~= -999999) & (tile_bathy > -1e20);
+
+        % simple final mask:
+        % 1 = 需要预测 / 需要从输入中遮掉
+        % 0 = 已知区域 / 不预测
+        tile_finalMask = (tile_LCC_raw == 1) & bathy_valid;
+
+        % 用 final mask 遮掉 bathy+3DEP 输入中的预测区域
         tileBathmatry3DEP_outRiver = tileBathmatry3DEP;
-        tileBathmatry3DEP_outRiver(tile_LCC == 1) = nan;
+        tileBathmatry3DEP_outRiver(tile_finalMask == 1) = nan;
 
         % ---- 写出各类 tiff ----
         outFormat = 'GTiff';
@@ -617,27 +640,28 @@ for r = targetRes
         nodataval_mask = 255;
         fileRas_LCC_Mask = fullfile(LCC_Mask_Folder, ...
             sprintf('Select_tile_%dm_%s_ID%d_LCC_Mask.tif', ...
-                    r, BasinName, PointID));
-        WriteRaster(fileRas_LCC_Mask, tile_LCC, subgeoTrans, proj, ...
-                    dataType_mask, outFormat, nodataval_mask);
+            r, BasinName, PointID));
+        WriteRaster(fileRas_LCC_Mask, double(uint8(tile_finalMask)), subgeoTrans, proj, ...
+            dataType_mask, outFormat, nodataval_mask);
 
         % 2) mask 后的 bathy+3DEP（只保留非 80 的部分）
         fileRas_Bath3DEP_outRiver = fullfile(TileOutRiver_Folder, ...
             sprintf('Select_tileOutRiver_%dm_%s_ID%d.tif', ...
-                    r, BasinName, PointID));
+            r, BasinName, PointID));
         WriteRaster(fileRas_Bath3DEP_outRiver, tileBathmatry3DEP_outRiver, ...
-                    subgeoTrans, proj, dataType, outFormat, nodataval);
+            subgeoTrans, proj, dataType, outFormat, nodataval);
 
         % 3) 完整的 bathy+3DEP（不 mask）
         fileRas_Bath3DEP_all = fullfile(Train_tile_Folder, ...
             sprintf('Select_tile_Basin_%dm_%s_ID%d.tif', ...
-                    r, BasinName, PointID));
+            r, BasinName, PointID));
         WriteRaster(fileRas_Bath3DEP_all, tileBathmatry3DEP, ...
-                    subgeoTrans, proj, dataType, outFormat, nodataval);
+            subgeoTrans, proj, dataType, outFormat, nodataval);
 
         fprintf('Res = %dm: PointID = %d Tile extraction is done!\n', r, PointID);
         % 清理临时变量
-        clear subgeoTrans tile_LCC tileBathmatry3DEP tileBathmatry3DEP_outRiver
+        clear subgeoTrans tile_bathy tile_LCC_raw tile_finalMask bathy_valid ...
+            tileBathmatry3DEP tileBathmatry3DEP_outRiver
         clear Points_Lon Points_Lat row0 col0 r1 c1 h w
         clear PointID
     end

@@ -103,6 +103,7 @@ class DEMTileDataset(Dataset):
         tile_norm: bool = False,
         tile_norm_eps: float = 1e-3,
         return_meta: bool = False,
+        tile_norm_std_scale: float = 1.0,
     ):
         if (not dir_path) and (not list_path):
             raise ValueError('DEMTileDataset: either dir_path or list_path must be provided')
@@ -116,6 +117,11 @@ class DEMTileDataset(Dataset):
         self.tile_norm = bool(tile_norm)
         self.tile_norm_eps = float(tile_norm_eps)
         self.return_meta = bool(return_meta)
+        self.tile_norm_std_scale = float(tile_norm_std_scale)
+        if self.tile_norm_std_scale <= 0:
+            raise ValueError(
+                f"tile_norm_std_scale must be > 0, got {self.tile_norm_std_scale}"
+            )
 
         self.files: List[str] = []
         if self.list_path:
@@ -186,8 +192,11 @@ class DEMTileDataset(Dataset):
         """
         tile_mean_m = float(np.mean(arr))
         tile_std_m = float(np.std(arr))
-        tile_std_safe = max(tile_std_m, self.tile_norm_eps)
+        tile_std_scaled = tile_std_m * self.tile_norm_std_scale
+        tile_std_safe = max(tile_std_scaled, self.tile_norm_eps)
+
         arr_tile = (arr - tile_mean_m) / tile_std_safe
+
         return arr_tile.astype(np.float32, copy=False), tile_mean_m, tile_std_m, tile_std_safe
 
     def __getitem__(self, idx: int):
@@ -238,7 +247,8 @@ class DEMTileDataset(Dataset):
             arr_model = self._normalize(arr_m).astype(np.float32, copy=False)
             tile_mean_m = float(np.mean(arr_m))
             tile_std_m = float(np.std(arr_m))
-            tile_std_safe = max(tile_std_m, self.tile_norm_eps)
+            tile_std_scaled = tile_std_m * self.tile_norm_std_scale
+            tile_std_safe = max(tile_std_scaled, self.tile_norm_eps)
 
         arr_model = np.ascontiguousarray(arr_model)
         x = torch.from_numpy(arr_model).unsqueeze(0)  # [1,H,W]
@@ -249,6 +259,7 @@ class DEMTileDataset(Dataset):
             "tile_std_m": tile_std_m,
             "tile_std_safe": tile_std_safe,
             "tile_norm": bool(self.tile_norm),
+            "tile_norm_std_scale": float(self.tile_norm_std_scale),
             "global_norm_method": self.norm_method,
             "global_norm_a": float(self.norm_a),
             "global_norm_b": float(self.norm_b),
@@ -466,6 +477,7 @@ class DEMLCCPairDataset(Dataset):
         return_path: bool = False,
         tile_norm: bool = False,
         tile_norm_eps: float = 1e-3,
+        tile_norm_std_scale: float = 1.0,
         return_meta: bool = True,
         tile_norm_visible_only: bool = False,
         min_lcc_patch_ratio: float = 0.0,
@@ -486,6 +498,11 @@ class DEMLCCPairDataset(Dataset):
         self.return_path = bool(return_path)
         self.tile_norm = bool(tile_norm)
         self.tile_norm_eps = float(tile_norm_eps)
+        self.tile_norm_std_scale = float(tile_norm_std_scale)
+        if self.tile_norm_std_scale <= 0:
+            raise ValueError(
+                f"tile_norm_std_scale must be > 0, got {self.tile_norm_std_scale}"
+            )
         self.return_meta = bool(return_meta)
         self.tile_norm_visible_only = bool(tile_norm_visible_only)
         self.patch_size = int(patch_size)
@@ -600,8 +617,11 @@ class DEMLCCPairDataset(Dataset):
         else:
             tile_mean_m = float(np.mean(vals))
             tile_std_m = float(np.std(vals))
-        tile_std_safe = max(tile_std_m, self.tile_norm_eps)
+        tile_std_scaled = tile_std_m * self.tile_norm_std_scale
+        tile_std_safe = max(tile_std_scaled, self.tile_norm_eps)
+
         arr_tile = (arr - tile_mean_m) / tile_std_safe
+
         return arr_tile.astype(np.float32, copy=False), tile_mean_m, tile_std_m, tile_std_safe
 
     def __getitem__(self, idx: int):
@@ -637,7 +657,8 @@ class DEMLCCPairDataset(Dataset):
             arr_model = self._normalize(arr_m).astype(np.float32, copy=False)
             tile_mean_m = float(np.mean(arr_m))
             tile_std_m = float(np.std(arr_m))
-            tile_std_safe = max(tile_std_m, self.tile_norm_eps)
+            tile_std_scaled = tile_std_m * self.tile_norm_std_scale
+            tile_std_safe = max(tile_std_scaled, self.tile_norm_eps)
 
         lcc_pixel_ratio = float(lcc.mean())
         lcc_patch_ratio = _patch_ratio_from_mask(lcc, patch_size=self.patch_size, threshold=self.lcc_patch_threshold)
@@ -651,6 +672,7 @@ class DEMLCCPairDataset(Dataset):
             "tile_mean_m": tile_mean_m,
             "tile_std_m": tile_std_m,
             "tile_std_safe": tile_std_safe,
+            "tile_norm_std_scale": float(self.tile_norm_std_scale),
             "tile_norm": bool(self.tile_norm),
             "tile_norm_visible_only": bool(self.tile_norm_visible_only),
             "global_norm_method": self.norm_method,
