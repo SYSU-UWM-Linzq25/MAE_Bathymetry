@@ -232,7 +232,7 @@ def main():
     ap.add_argument("--in_chans", type=int, default=1)
     ap.add_argument("--batch_size", type=int, default=8)
     ap.add_argument("--num_workers", type=int, default=4)
-    ap.add_argument("--nodata", type=float, default=-9999.0)
+    ap.add_argument("--nodata", type=float, default=-999999.0, help="NoData value used by input bathy+3DEP tiles.")
     ap.add_argument("--device", default="cuda")
     ap.add_argument("--amp", action="store_true")
     ap.add_argument("--tile_norm", action="store_true")
@@ -277,6 +277,7 @@ def main():
     print(f"[INFO] tile_norm_visible_only={args.tile_norm_visible_only}")
     print(f"[INFO] tile_norm_std_scale={args.tile_norm_std_scale}")
     print(f"[INFO] tile_norm_eps={args.tile_norm_eps}")
+    print(f"[INFO] nodata={args.nodata}")
 
     dataset = DEMLCCPairDataset(
         dem_dir=args.data_root,
@@ -479,6 +480,7 @@ def main():
         "tile_norm_visible_only": bool(args.tile_norm_visible_only),
         "tile_norm_std_scale": float(args.tile_norm_std_scale),
         "tile_norm_eps": float(args.tile_norm_eps),
+        "nodata": float(args.nodata),
         "metrics_csv": str(metrics_csv),
         "top_csv": str(top_csv),
         "best_csv": str(best_csv),

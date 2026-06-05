@@ -1,13 +1,13 @@
 #!/bin/bash
-#SBATCH -J s4_finalmask_dec
+#SBATCH -J s4_fullnorm_dec
 #SBATCH -p gpu
-#SBATCH -w execute-3000
+#SBATCH -w execute-3001
 #SBATCH -N 1
 #SBATCH -n 1
 #SBATCH -c 8
 #SBATCH -t 7-00:00:00
-#SBATCH -o /tank/data/SFS/xinyis/data/bathymetry/MAE-Topography/Downstream_Task_Bathy/logs/train_s4_finalmask_%j.out
-#SBATCH -e /tank/data/SFS/xinyis/data/bathymetry/MAE-Topography/Downstream_Task_Bathy/logs/train_s4_finalmask_%j.out
+#SBATCH -o /tank/data/SFS/xinyis/data/bathymetry/MAE-Topography/Downstream_Task_Bathy/logs/train_s4_fullnorm_%j.out
+#SBATCH -e /tank/data/SFS/xinyis/data/bathymetry/MAE-Topography/Downstream_Task_Bathy/logs/train_s4_fullnorm_%j.out
 #SBATCH --chdir=/tank/data/SFS/xinyis/data/bathymetry/MAE-Topography
 #SBATCH --mail-user=zequnlin@uwm.edu
 #SBATCH --mail-type=BEGIN,END,FAIL
@@ -30,7 +30,7 @@ fi
 VAL_RIVER="$1"
 SAFE_VAL=$(echo "$VAL_RIVER" | sed 's/[^A-Za-z0-9_]/_/g')
 
-echo "=== STAGE4 FINAL-MASK HOLDOUT TRAIN JOB ${SLURM_JOB_ID:-local} on $(hostname) ==="
+echo "=== STAGE4 FULL-TILE-NORM HOLDOUT TRAIN JOB ${SLURM_JOB_ID:-local} on $(hostname) ==="
 date
 
 # ==============================
@@ -41,7 +41,7 @@ source /home/uwm/zequnlin/miniconda3/etc/profile.d/conda.sh
 conda activate /tank/data/SFS/xinyis/data/bathymetry/MAE-Topography/conda_envs/mae_zequn
 export LD_LIBRARY_PATH="$CONDA_PREFIX/lib:$CONDA_PREFIX/lib/python3.12/site-packages/torch/lib:${LD_LIBRARY_PATH:-}"
 
-GPU_ID=${GPU_ID:-0}
+GPU_ID=${GPU_ID:-1}
 export CUDA_DEVICE_ORDER=PCI_BUS_ID
 export CUDA_VISIBLE_DEVICES="$GPU_ID"
 export PYTORCH_CUDA_ALLOC_CONF=${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}
@@ -96,11 +96,12 @@ MASK=$ROOT/Data/TilesMask_for_Training_1m/1m_Tiles
 UP_CKPT=$ROOT/Upstream_Model_ReTrain/runs/Small_tilenorm_viscorr_336/checkpoint-best.pth
 ENTRY=$CODE/main_pretrain_dem.py
 
-STD_SCALE=${STD_SCALE:-1.5}
+STD_SCALE=${STD_SCALE:-1.0}
 END_EPOCH=${END_EPOCH:-400}
 # Actual NoData value used by the extracted 1 m bathy+3DEP tiles.
 NODATA=${NODATA:-"-999999"}
-RUN_NAME=stage4_bathy_finalmask_holdout_${SAFE_VAL}_exact_freeze_decoder_tilenormVis_std${STD_SCALE//./p}_1m_e${END_EPOCH}
+NORM_MODE=full_tile
+RUN_NAME=stage4_bathy_finalmask_holdout_${SAFE_VAL}_exact_freeze_decoder_tilenormFull_std${STD_SCALE//./p}_1m_e${END_EPOCH}
 OUT=$WORK/runs/$RUN_NAME
 
 mkdir -p "$OUT" "$WORK/logs"
@@ -118,6 +119,7 @@ echo "MASK=$MASK"
 echo "UP_CKPT=$UP_CKPT"
 echo "STD_SCALE=$STD_SCALE"
 echo "NODATA=$NODATA"
+echo "NORM_MODE=$NORM_MODE"
 echo "OUT=$OUT"
 
 # ==============================
@@ -140,7 +142,7 @@ python "$ENTRY" --help > "$OUT/help.txt" 2>&1 || true
 for key in \
   lcc_mask_path train_lcc_list val_lcc_list lcc_mask_mode \
   init_ckpt freeze_encoder bottleneck_norm plot_every vis_every \
-  tile_norm_visible_only tile_norm_std_scale nodata; do
+  tile_norm_std_scale nodata; do
   if ! grep -q -- "$key" "$OUT/help.txt"; then
     echo "[ERROR] $ENTRY does not support expected argument containing: $key"
     echo "        Did you point ENTRY to the modified mae_Retrain/main_pretrain_dem.py?"
@@ -178,8 +180,9 @@ fi
 # ==============================
 # 5. Training
 # ==============================
-# Tile normalization uses only visible/known pixels (final mask == 0).
-# The normalization denominator is visible_std * STD_SCALE.
+# Full-tile normalization experiment:
+# mean/std are computed from all finite pixels in the input tile.
+# NoData pixels are excluded. The denominator is full_tile_std * STD_SCALE.
 PYTHONUNBUFFERED=1 python -u "$ENTRY" \
   --device cuda \
   --data_root "$BATH" \
@@ -201,7 +204,6 @@ PYTHONUNBUFFERED=1 python -u "$ENTRY" \
   --bottleneck_norm inst1d \
   --pin_mem \
   --tile_norm \
-  --tile_norm_visible_only \
   --tile_norm_eps 1e-3 \
   --tile_norm_std_scale "$STD_SCALE" \
   --init_ckpt "$UP_CKPT" \
@@ -227,5 +229,5 @@ PYTHONUNBUFFERED=1 python -u "$ENTRY" \
   "${RESUME_ARGS[@]}"
 
 date
-echo "=== STAGE4 FINAL-MASK HOLDOUT TRAIN DONE ==="
+echo "=== STAGE4 FULL-TILE-NORM HOLDOUT TRAIN DONE ==="
 echo "RUN=$OUT"

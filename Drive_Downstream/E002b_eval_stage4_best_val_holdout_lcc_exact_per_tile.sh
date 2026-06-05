@@ -25,6 +25,8 @@ VAL_RIVER="$1"
 SAFE_VAL=$(echo "$VAL_RIVER" | sed 's/[^A-Za-z0-9_]/_/g')
 STD_SCALE=${STD_SCALE:-1.5}
 END_EPOCH=${END_EPOCH:-400}
+# Actual NoData value in the extracted 1 m bathy+3DEP tiles.
+NODATA=${NODATA:-"-999999"}
 
 module purge || true
 source /home/uwm/zequnlin/miniconda3/etc/profile.d/conda.sh
@@ -56,6 +58,7 @@ echo "CKPT=$CKPT"
 echo "SPLIT=$SPLIT"
 echo "OUT=$OUT"
 echo "STD_SCALE=$STD_SCALE"
+echo "NODATA=$NODATA"
 
 for f in "$CKPT" "$EVAL_SCRIPT" "$SPLIT/val.txt" "$SPLIT/val_masks.txt"; do
   if [[ ! -f "$f" ]]; then
@@ -84,7 +87,7 @@ python -u "$EVAL_SCRIPT" \
   --in_chans 1 \
   --batch_size 8 \
   --num_workers 8 \
-  --nodata -9999 \
+  --nodata "$NODATA" \
   --amp \
   --tile_norm \
   --tile_norm_visible_only \
