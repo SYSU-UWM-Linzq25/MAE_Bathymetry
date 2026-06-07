@@ -74,12 +74,47 @@ def _read_dem_tiff(path: str | Path) -> np.ndarray:
     return arr.astype(np.float32, copy=False)
 
 
-def _apply_nodata(arr: np.ndarray, nodata: Optional[float]) -> np.ndarray:
+def _valid_mask_from_values(
+    arr: np.ndarray,
+    nodata: Optional[float],
+    nodata_threshold: Optional[float] = -9999.0,
+) -> np.ndarray:
+    """Return a robust pixel-validity mask for DEM/bathymetry values.
+
+    A pixel is invalid when any of the following is true:
+      1) the value is NaN/Inf;
+      2) it matches the declared NoData value;
+      3) it is <= ``nodata_threshold`` (default -9999).
+
+    The threshold rule catches mixed sentinels such as -9999, -99999 and
+    -999999. Values this low are outside the physically meaningful range of
+    the bathymetry/topography tiles used by this project.
+    """
     a = arr.astype(np.float32, copy=False)
+    valid = np.isfinite(a)
+
     if nodata is not None:
-        a = np.where(a == nodata, np.nan, a)
-    a = np.where(np.isfinite(a), a, np.nan)
-    return a
+        nd = float(nodata)
+        # Exact comparison handles integer-like GeoTIFF sentinels. isclose also
+        # protects against float32 representation differences.
+        atol = max(1.0e-6, abs(nd) * 1.0e-7)
+        valid &= ~np.isclose(a, nd, rtol=0.0, atol=atol)
+
+    if nodata_threshold is not None:
+        valid &= a > float(nodata_threshold)
+
+    return valid
+
+
+def _apply_nodata(
+    arr: np.ndarray,
+    nodata: Optional[float],
+    nodata_threshold: Optional[float] = -9999.0,
+) -> np.ndarray:
+    """Convert all detected NoData/invalid values to NaN."""
+    a = arr.astype(np.float32, copy=False)
+    valid = _valid_mask_from_values(a, nodata, nodata_threshold)
+    return np.where(valid, a, np.nan).astype(np.float32, copy=False)
 
 
 class DEMTileDataset(Dataset):
@@ -98,6 +133,7 @@ class DEMTileDataset(Dataset):
         list_path: Optional[str] = None,
         input_size: int = 336,
         nodata: Optional[float] = None,
+        nodata_threshold: Optional[float] = -9999.0,
         random_flip: bool = False,
         return_path: bool = False,
         tile_norm: bool = False,
@@ -112,6 +148,7 @@ class DEMTileDataset(Dataset):
         self.list_path = str(list_path) if list_path else ''
         self.input_size = int(input_size)
         self.nodata = nodata
+        self.nodata_threshold = nodata_threshold
         self.random_flip = bool(random_flip)
         self.return_path = bool(return_path)
         self.tile_norm = bool(tile_norm)
@@ -201,7 +238,7 @@ class DEMTileDataset(Dataset):
 
     def __getitem__(self, idx: int):
         f = self.files[idx]
-        arr = _apply_nodata(_read_dem_tiff(f), self.nodata)
+        arr = _apply_nodata(_read_dem_tiff(f), self.nodata, self.nodata_threshold)
 
         if np.isnan(arr).any():
             if self.norm_method == 'meanstd':
@@ -277,6 +314,7 @@ class DEMTileDataset(Dataset):
 def compute_global_stats(
     files: Sequence[str],
     nodata: Optional[float] = None,
+    nodata_threshold: Optional[float] = -9999.0,
     max_files: Optional[int] = 5000,
     max_pixels_per_file: int = 5000,
     seed: int = 0,
@@ -303,7 +341,7 @@ def compute_global_stats(
 
     for fp in sample_files:
         try:
-            arr = _apply_nodata(_read_dem_tiff(fp), nodata)
+            arr = _apply_nodata(_read_dem_tiff(fp), nodata, nodata_threshold)
         except Exception:
             continue
 
@@ -349,12 +387,13 @@ def compute_global_stats(
 def compute_dem_stats(
     files: Sequence[str],
     nodata: Optional[float] = None,
+    nodata_threshold: Optional[float] = -9999.0,
     max_files: int = 5000,
     method: str = 'meanstd',
     seed: int = 0,
 ) -> Dict[str, float]:
     """Backward-compatible wrapper expected by main_pretrain_dem.py."""
-    stats = compute_global_stats(files, nodata=nodata, max_files=max_files, seed=seed)
+    stats = compute_global_stats(files, nodata=nodata, nodata_threshold=nodata_threshold, max_files=max_files, seed=seed)
     method = method.lower()
     if method not in ('meanstd', 'minmax'):
         raise ValueError(f'Unknown stats method: {method}')
@@ -410,11 +449,22 @@ def _read_lcc_mask_tiff(path: str | Path) -> np.ndarray:
     return (arr > 0).astype(np.uint8, copy=False)
 
 
-def _center_or_pad_pair(arr: np.ndarray, mask: np.ndarray, input_size: int, random_crop: bool) -> Tuple[np.ndarray, np.ndarray]:
+def _center_or_pad_triplet(
+    arr: np.ndarray,
+    mask: np.ndarray,
+    valid: np.ndarray,
+    input_size: int,
+    random_crop: bool,
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Apply the same crop/pad to data, river mask, and validity mask.
+
+    Padding is deliberately marked invalid. It must never become a visible
+    encoder patch or a supervised prediction target.
+    """
     h, w = arr.shape
     s = int(input_size)
     if h == s and w == s:
-        return arr, mask
+        return arr, mask, valid
 
     if h >= s and w >= s:
         if random_crop:
@@ -423,28 +473,124 @@ def _center_or_pad_pair(arr: np.ndarray, mask: np.ndarray, input_size: int, rand
         else:
             top = (h - s) // 2
             left = (w - s) // 2
-        return arr[top:top + s, left:left + s], mask[top:top + s, left:left + s]
+        sl = np.s_[top:top + s, left:left + s]
+        return arr[sl], mask[sl], valid[sl]
 
-    m = float(np.nanmean(arr)) if np.isfinite(np.nanmean(arr)) else 0.0
-    out_arr = np.full((s, s), m, dtype=np.float32)
+    out_arr = np.full((s, s), np.nan, dtype=np.float32)
     out_mask = np.zeros((s, s), dtype=np.uint8)
+    out_valid = np.zeros((s, s), dtype=np.uint8)
     hh = min(h, s)
     ww = min(w, s)
     out_arr[:hh, :ww] = arr[:hh, :ww]
     out_mask[:hh, :ww] = mask[:hh, :ww]
-    return out_arr, out_mask
+    out_valid[:hh, :ww] = valid[:hh, :ww]
+    return out_arr, out_mask, out_valid
 
 
-def _patch_ratio_from_mask(mask: np.ndarray, patch_size: int = 16, threshold: float = 0.5) -> float:
-    """Approximate LCC patch ratio after max-pooling mask to patch grid."""
-    h, w = mask.shape
+def _center_or_pad_pair(arr: np.ndarray, mask: np.ndarray, input_size: int, random_crop: bool) -> Tuple[np.ndarray, np.ndarray]:
+    """Backward-compatible wrapper for older callers."""
+    valid = np.isfinite(arr).astype(np.uint8)
+    arr2, mask2, _ = _center_or_pad_triplet(arr, mask, valid, input_size, random_crop)
+    return arr2, mask2
+
+
+def _patch_status_from_masks(
+    lcc_mask: np.ndarray,
+    valid_mask: np.ndarray,
+    patch_size: int = 16,
+    threshold: float = 0.5,
+) -> Dict[str, np.ndarray]:
+    """Build mutually exclusive patch states.
+
+    Rules used by the downstream exact-mask task:
+      * candidate patch: any river/final-mask pixel occurs in the patch;
+      * valid patch: every pixel in the patch is valid (no NoData at all);
+      * prediction patch: candidate AND valid;
+      * visible patch: non-candidate AND valid;
+      * ignored patch: any NoData pixel occurs in the patch.
+    """
+    if lcc_mask.shape != valid_mask.shape:
+        raise ValueError(f"Mask/valid shape mismatch: {lcc_mask.shape} vs {valid_mask.shape}")
+
+    h, w = lcc_mask.shape
     p = int(patch_size)
     hh = (h // p) * p
     ww = (w // p) * p
     if hh <= 0 or ww <= 0:
-        return 0.0
-    m = mask[:hh, :ww].reshape(hh // p, p, ww // p, p).max(axis=(1, 3))
-    return float((m > threshold).mean())
+        z = np.zeros((0, 0), dtype=bool)
+        return {
+            "candidate": z, "valid": z, "prediction": z,
+            "visible": z, "ignored": z,
+        }
+
+    lcc_blocks = lcc_mask[:hh, :ww].reshape(hh // p, p, ww // p, p)
+    valid_blocks = valid_mask[:hh, :ww].reshape(hh // p, p, ww // p, p)
+
+    candidate = lcc_blocks.max(axis=(1, 3)) > float(threshold)
+    valid_patch = valid_blocks.min(axis=(1, 3)) > 0
+    prediction = candidate & valid_patch
+    visible = (~candidate) & valid_patch
+    ignored = ~valid_patch
+
+    return {
+        "candidate": candidate,
+        "valid": valid_patch,
+        "prediction": prediction,
+        "visible": visible,
+        "ignored": ignored,
+    }
+
+
+def _center_core_patch_mask(grid_shape, radius: int = 3) -> np.ndarray:
+    """Return a centered square patch mask with half-width ``radius``.
+
+    For the current 21x21 patch grid and radius=3, this is a 7x7 core.
+    The full tile is still used by the encoder/decoder; this mask only defines
+    the optional loss/evaluation region and tile-quality checks.
+    """
+    gh, gw = int(grid_shape[0]), int(grid_shape[1])
+    if gh <= 0 or gw <= 0:
+        return np.zeros((max(0, gh), max(0, gw)), dtype=bool)
+    r = int(radius)
+    if r < 0:
+        raise ValueError(f"core_patch_radius must be >= 0, got {r}")
+    cy, cx = gh // 2, gw // 2
+    y0, y1 = max(0, cy - r), min(gh, cy + r + 1)
+    x0, x1 = max(0, cx - r), min(gw, cx + r + 1)
+    out = np.zeros((gh, gw), dtype=bool)
+    out[y0:y1, x0:x1] = True
+    return out
+
+
+def _core_patch_metrics(status: Dict[str, np.ndarray], radius: int = 3) -> Dict[str, float]:
+    """Summarize validity and prediction coverage inside the centered core."""
+    core = _center_core_patch_mask(status["valid"].shape, radius=radius)
+    n_core = int(core.sum())
+    if n_core <= 0:
+        return {
+            "core_patch_count": 0,
+            "core_valid_patch_count": 0,
+            "core_prediction_patch_count": 0,
+            "core_valid_patch_ratio": 0.0,
+            "core_prediction_patch_ratio": 0.0,
+        }
+    n_valid = int((status["valid"] & core).sum())
+    n_pred = int((status["prediction"] & core).sum())
+    return {
+        "core_patch_count": n_core,
+        "core_valid_patch_count": n_valid,
+        "core_prediction_patch_count": n_pred,
+        "core_valid_patch_ratio": float(n_valid / n_core),
+        # Unknown/prediction share is defined among usable core patches.
+        "core_prediction_patch_ratio": float(n_pred / max(1, n_valid)),
+    }
+
+
+def _patch_ratio_from_mask(mask: np.ndarray, patch_size: int = 16, threshold: float = 0.5) -> float:
+    """Approximate LCC patch ratio after max-pooling mask to patch grid."""
+    valid = np.ones_like(mask, dtype=np.uint8)
+    status = _patch_status_from_masks(mask, valid, patch_size=patch_size, threshold=threshold)
+    return float(status["candidate"].mean()) if status["candidate"].size else 0.0
 
 
 class DEMLCCPairDataset(Dataset):
@@ -453,9 +599,10 @@ class DEMLCCPairDataset(Dataset):
     Returns by default:
         x:        FloatTensor [1,H,W], normalized DEM/bathy tile
         meta:     dict with path, tile stats, and LCC ratios
-        lcc_mask: FloatTensor [1,H,W], 1=LCC/river/masked region
+        lcc_mask:   FloatTensor [1,H,W], 1=LCC/river/masked region
+        valid_mask: FloatTensor [1,H,W], 1=valid data, 0=NoData/invalid
 
-    If return_path=True, returns (x, meta, path, lcc_mask).
+    If return_path=True, returns (x, meta, path, lcc_mask, valid_mask).
 
     Pairing modes:
       - If dem_list_path and lcc_list_path are both provided, pairs are matched line-by-line.
@@ -473,6 +620,7 @@ class DEMLCCPairDataset(Dataset):
         lcc_list_path: Optional[str] = None,
         input_size: int = 336,
         nodata: Optional[float] = None,
+        nodata_threshold: Optional[float] = -9999.0,
         random_flip: bool = False,
         return_path: bool = False,
         tile_norm: bool = False,
@@ -482,6 +630,12 @@ class DEMLCCPairDataset(Dataset):
         tile_norm_visible_only: bool = False,
         min_lcc_patch_ratio: float = 0.0,
         max_lcc_patch_ratio: float = 1.0,
+        min_valid_visible_patch_ratio: float = 0.0,
+        loss_region_mode: str = "all",
+        core_patch_radius: int = 3,
+        min_core_valid_patch_ratio: float = 0.0,
+        min_core_prediction_patch_ratio: float = 0.0,
+        max_core_prediction_patch_ratio: float = 1.0,
         patch_size: int = 16,
         lcc_patch_threshold: float = 0.5,
     ):
@@ -494,6 +648,7 @@ class DEMLCCPairDataset(Dataset):
         self.lcc_dir = str(lcc_dir) if lcc_dir else ''
         self.input_size = int(input_size)
         self.nodata = nodata
+        self.nodata_threshold = nodata_threshold
         self.random_flip = bool(random_flip)
         self.return_path = bool(return_path)
         self.tile_norm = bool(tile_norm)
@@ -507,6 +662,35 @@ class DEMLCCPairDataset(Dataset):
         self.tile_norm_visible_only = bool(tile_norm_visible_only)
         self.patch_size = int(patch_size)
         self.lcc_patch_threshold = float(lcc_patch_threshold)
+        self.min_valid_visible_patch_ratio = float(min_valid_visible_patch_ratio)
+        if not (0.0 <= self.min_valid_visible_patch_ratio <= 1.0):
+            raise ValueError(
+                "min_valid_visible_patch_ratio must be in [0,1], "
+                f"got {self.min_valid_visible_patch_ratio}"
+            )
+        self.loss_region_mode = str(loss_region_mode).lower()
+        if self.loss_region_mode not in {"all", "core"}:
+            raise ValueError(
+                f"loss_region_mode must be 'all' or 'core', got {loss_region_mode}"
+            )
+        self.core_patch_radius = int(core_patch_radius)
+        if self.core_patch_radius < 0:
+            raise ValueError("core_patch_radius must be >= 0")
+        self.min_core_valid_patch_ratio = float(min_core_valid_patch_ratio)
+        self.min_core_prediction_patch_ratio = float(min_core_prediction_patch_ratio)
+        self.max_core_prediction_patch_ratio = float(max_core_prediction_patch_ratio)
+        for name, value in (
+            ("min_core_valid_patch_ratio", self.min_core_valid_patch_ratio),
+            ("min_core_prediction_patch_ratio", self.min_core_prediction_patch_ratio),
+            ("max_core_prediction_patch_ratio", self.max_core_prediction_patch_ratio),
+        ):
+            if not (0.0 <= value <= 1.0):
+                raise ValueError(f"{name} must be in [0,1], got {value}")
+        if self.min_core_prediction_patch_ratio > self.max_core_prediction_patch_ratio:
+            raise ValueError(
+                "min_core_prediction_patch_ratio cannot exceed "
+                "max_core_prediction_patch_ratio"
+            )
 
         if dem_list_path:
             dem_files = _read_list_file(dem_list_path, base_dir=self.dem_dir if self.dem_dir else None)
@@ -549,29 +733,125 @@ class DEMLCCPairDataset(Dataset):
             if missing:
                 print(f'[DEMLCCPairDataset] WARNING: {len(missing)} DEM files have no paired LCC mask. Example: {missing[:5]}')
 
-        # Optional ratio filter. This is useful to remove empty no-river tiles or extreme/coastal tiles.
+        # Patch-aware quality filter. A patch containing ANY NoData pixel is
+        # ignored completely: it is neither visible encoder input nor a
+        # prediction/loss target. Ratios below are computed after that removal.
         min_r = float(min_lcc_patch_ratio)
         max_r = float(max_lcc_patch_ratio)
-        if min_r > 0.0 or max_r < 1.0:
+        min_visible_r = self.min_valid_visible_patch_ratio
+        use_core_filter = self.loss_region_mode == "core"
+        if (min_r > 0.0 or max_r < 1.0 or min_visible_r > 0.0
+                or use_core_filter):
             kept = []
-            dropped = 0
+            drop_reason = {
+                "read_error": 0,
+                "prediction_ratio": 0,
+                "visible_ratio": 0,
+                "no_prediction_patch": 0,
+                "core_valid_ratio": 0,
+                "core_no_prediction_patch": 0,
+                "core_prediction_ratio": 0,
+            }
+            examples = []
+
             for dp, mp in pairs:
                 try:
+                    raw = _read_dem_tiff(dp)
+                    valid = _valid_mask_from_values(
+                        raw, self.nodata, self.nodata_threshold
+                    ).astype(np.uint8, copy=False)
+                    arr = np.where(valid > 0, raw, np.nan).astype(np.float32, copy=False)
                     m = _read_lcc_mask_tiff(mp)
-                    # Use center crop/pad for deterministic filtering; training may still random-crop if enabled.
-                    dummy = np.zeros_like(m, dtype=np.float32)
-                    _, mm = _center_or_pad_pair(dummy, m, self.input_size, random_crop=False)
-                    r = _patch_ratio_from_mask(mm, patch_size=self.patch_size, threshold=self.lcc_patch_threshold)
-                except Exception:
-                    r = 0.0
-                if min_r <= r <= max_r:
-                    kept.append((dp, mp))
-                else:
-                    dropped += 1
-            print(f'[DEMLCCPairDataset] ratio filter: kept={len(kept)} dropped={dropped} min={min_r} max={max_r}')
+                    if arr.shape != m.shape:
+                        raise ValueError(
+                            f"Shape mismatch: DEM {arr.shape} vs LCC {m.shape}"
+                        )
+
+                    # Deterministic filtering. For the current 336x336 tiles this
+                    # does not crop; it also marks any padding as invalid.
+                    _, mm, vv = _center_or_pad_triplet(
+                        arr, m, valid, self.input_size, random_crop=False
+                    )
+                    status = _patch_status_from_masks(
+                        mm, vv, patch_size=self.patch_size,
+                        threshold=self.lcc_patch_threshold,
+                    )
+                    n_total = int(status["valid"].size)
+                    if n_total <= 0:
+                        raise ValueError("No complete patches after crop/pad")
+
+                    pred_r = float(status["prediction"].sum() / n_total)
+                    visible_r = float(status["visible"].sum() / n_total)
+                    n_pred = int(status["prediction"].sum())
+                    core_metrics = _core_patch_metrics(
+                        status, radius=self.core_patch_radius
+                    )
+                    core_valid_r = core_metrics["core_valid_patch_ratio"]
+                    core_pred_r = core_metrics["core_prediction_patch_ratio"]
+                    core_n_pred = core_metrics["core_prediction_patch_count"]
+
+                    reason = None
+                    if n_pred == 0:
+                        reason = "no_prediction_patch"
+                    elif not (min_r <= pred_r <= max_r):
+                        reason = "prediction_ratio"
+                    elif visible_r < min_visible_r:
+                        reason = "visible_ratio"
+                    elif use_core_filter and core_valid_r < self.min_core_valid_patch_ratio:
+                        reason = "core_valid_ratio"
+                    elif use_core_filter and core_n_pred == 0:
+                        reason = "core_no_prediction_patch"
+                    elif use_core_filter and not (
+                        self.min_core_prediction_patch_ratio
+                        <= core_pred_r
+                        <= self.max_core_prediction_patch_ratio
+                    ):
+                        reason = "core_prediction_ratio"
+
+                    if reason is None:
+                        kept.append((dp, mp))
+                    else:
+                        drop_reason[reason] += 1
+                        if len(examples) < 20:
+                            examples.append(
+                                f"{Path(dp).name}: reason={reason}, "
+                                f"prediction_ratio={pred_r:.6f}, "
+                                f"visible_valid_ratio={visible_r:.6f}, "
+                                f"ignored_ratio={float(status['ignored'].mean()):.6f}, "
+                                f"core_valid_ratio={core_valid_r:.6f}, "
+                                f"core_prediction_ratio={core_pred_r:.6f}"
+                            )
+                except Exception as exc:
+                    drop_reason["read_error"] += 1
+                    if len(examples) < 20:
+                        examples.append(
+                            f"{Path(dp).name}: reason=read_error, error={exc!r}"
+                        )
+
+            dropped = sum(drop_reason.values())
+            print(
+                '[DEMLCCPairDataset] patch-quality filter: '
+                f'kept={len(kept)} dropped={dropped} '
+                f'prediction_ratio=[{min_r},{max_r}] '
+                f'min_valid_visible_patch_ratio={min_visible_r} '
+                f'loss_region_mode={self.loss_region_mode} '
+                f'core_patch_radius={self.core_patch_radius} '
+                f'core_valid_min={self.min_core_valid_patch_ratio} '
+                f'core_prediction_range=['
+                f'{self.min_core_prediction_patch_ratio},'
+                f'{self.max_core_prediction_patch_ratio}] '
+                f'drop_reasons={drop_reason}'
+            )
+            if examples:
+                print('[DEMLCCPairDataset] dropped examples:')
+                for msg in examples:
+                    print('  ' + msg)
+
             pairs = kept
             if len(pairs) == 0:
-                raise RuntimeError('All DEM/LCC pairs were removed by min/max LCC ratio filtering.')
+                raise RuntimeError(
+                    'All DEM/LCC pairs were removed by patch-quality filtering.'
+                )
 
         self.pairs: List[Tuple[str, str]] = [(str(a), str(b)) for a, b in pairs]
         self.files: List[str] = [a for a, _ in self.pairs]
@@ -603,40 +883,59 @@ class DEMLCCPairDataset(Dataset):
         denom = (self.norm_b - self.norm_a) if (self.norm_b - self.norm_a) != 0 else 1.0
         return (arr - self.norm_a) / denom
 
-    def _normalize_tile_instance(self, arr: np.ndarray, lcc_mask: Optional[np.ndarray] = None):
+    def _normalize_tile_instance(
+        self,
+        arr: np.ndarray,
+        lcc_mask: Optional[np.ndarray] = None,
+        valid_mask: Optional[np.ndarray] = None,
+    ):
+        valid = np.isfinite(arr)
+        if valid_mask is not None:
+            valid &= valid_mask.astype(bool)
+
         if self.tile_norm_visible_only and lcc_mask is not None:
-            known = (lcc_mask == 0) & np.isfinite(arr)
+            known = (lcc_mask == 0) & valid
             vals = arr[known]
             if vals.size < 2:
-                vals = arr[np.isfinite(arr)]
+                vals = arr[valid]
         else:
-            vals = arr[np.isfinite(arr)]
+            vals = arr[valid]
+
         if vals.size < 2:
-            tile_mean_m = 0.0
-            tile_std_m = 0.0
-        else:
-            tile_mean_m = float(np.mean(vals))
-            tile_std_m = float(np.std(vals))
+            raise ValueError(
+                'Tile has fewer than two valid values after NoData removal.'
+            )
+
+        tile_mean_m = float(np.mean(vals))
+        tile_std_m = float(np.std(vals))
         tile_std_scaled = tile_std_m * self.tile_norm_std_scale
         tile_std_safe = max(tile_std_scaled, self.tile_norm_eps)
 
         arr_tile = (arr - tile_mean_m) / tile_std_safe
+        # Invalid pixels are only tensor placeholders. Their patches are removed
+        # from encoder input, prediction targets, loss, RMSE, and visualization.
+        arr_tile = np.where(valid, arr_tile, 0.0)
 
         return arr_tile.astype(np.float32, copy=False), tile_mean_m, tile_std_m, tile_std_safe
 
     def __getitem__(self, idx: int):
         dem_path, mask_path = self.pairs[idx]
-        arr = _apply_nodata(_read_dem_tiff(dem_path), self.nodata)
+        raw = _read_dem_tiff(dem_path)
+        valid = _valid_mask_from_values(
+            raw, self.nodata, self.nodata_threshold
+        ).astype(np.uint8, copy=False)
+        arr = np.where(valid > 0, raw, np.nan).astype(np.float32, copy=False)
         lcc = _read_lcc_mask_tiff(mask_path)
 
         if arr.shape != lcc.shape:
-            raise ValueError(f'Shape mismatch: DEM {Path(dem_path).name} {arr.shape} vs LCC {Path(mask_path).name} {lcc.shape}')
+            raise ValueError(
+                f'Shape mismatch: DEM {Path(dem_path).name} {arr.shape} '
+                f'vs LCC {Path(mask_path).name} {lcc.shape}'
+            )
 
-        if np.isnan(arr).any():
-            fill = float(np.nanmean(arr)) if np.isfinite(np.nanmean(arr)) else 0.0
-            arr = np.where(np.isfinite(arr), arr, fill).astype(np.float32, copy=False)
-
-        arr, lcc = _center_or_pad_pair(arr, lcc, self.input_size, random_crop=self.random_flip)
+        arr, lcc, valid = _center_or_pad_triplet(
+            arr, lcc, valid, self.input_size, random_crop=self.random_flip
+        )
 
         if self.random_flip:
             flip_x = np.random.rand() < 0.5
@@ -644,27 +943,55 @@ class DEMLCCPairDataset(Dataset):
             if flip_x:
                 arr = np.flip(arr, axis=1)
                 lcc = np.flip(lcc, axis=1)
+                valid = np.flip(valid, axis=1)
             if flip_y:
                 arr = np.flip(arr, axis=0)
                 lcc = np.flip(lcc, axis=0)
+                valid = np.flip(valid, axis=0)
 
         arr_m = np.ascontiguousarray(arr).astype(np.float32, copy=False)
         lcc = np.ascontiguousarray(lcc).astype(np.uint8, copy=False)
+        valid = np.ascontiguousarray(valid).astype(np.uint8, copy=False)
 
         if self.tile_norm:
-            arr_model, tile_mean_m, tile_std_m, tile_std_safe = self._normalize_tile_instance(arr_m, lcc_mask=lcc)
+            arr_model, tile_mean_m, tile_std_m, tile_std_safe = (
+                self._normalize_tile_instance(
+                    arr_m, lcc_mask=lcc, valid_mask=valid
+                )
+            )
         else:
+            valid_bool = valid.astype(bool)
             arr_model = self._normalize(arr_m).astype(np.float32, copy=False)
-            tile_mean_m = float(np.mean(arr_m))
-            tile_std_m = float(np.std(arr_m))
+            arr_model = np.where(valid_bool, arr_model, 0.0).astype(
+                np.float32, copy=False
+            )
+            vals = arr_m[valid_bool]
+            if vals.size < 2:
+                raise ValueError(
+                    f'{Path(dem_path).name} has fewer than two valid pixels.'
+                )
+            tile_mean_m = float(np.mean(vals))
+            tile_std_m = float(np.std(vals))
             tile_std_scaled = tile_std_m * self.tile_norm_std_scale
             tile_std_safe = max(tile_std_scaled, self.tile_norm_eps)
 
+        status = _patch_status_from_masks(
+            lcc, valid, patch_size=self.patch_size,
+            threshold=self.lcc_patch_threshold,
+        )
+        n_total = max(1, int(status["valid"].size))
         lcc_pixel_ratio = float(lcc.mean())
-        lcc_patch_ratio = _patch_ratio_from_mask(lcc, patch_size=self.patch_size, threshold=self.lcc_patch_threshold)
+        candidate_patch_ratio = float(status["candidate"].sum() / n_total)
+        prediction_patch_ratio = float(status["prediction"].sum() / n_total)
+        visible_valid_patch_ratio = float(status["visible"].sum() / n_total)
+        ignored_patch_ratio = float(status["ignored"].sum() / n_total)
+        core_metrics = _core_patch_metrics(
+            status, radius=self.core_patch_radius
+        )
 
-        x = torch.from_numpy(np.ascontiguousarray(arr_model)).unsqueeze(0)  # [1,H,W]
-        lcc_t = torch.from_numpy(lcc.astype(np.float32, copy=False)).unsqueeze(0)  # [1,H,W]
+        x = torch.from_numpy(np.ascontiguousarray(arr_model)).unsqueeze(0)
+        lcc_t = torch.from_numpy(lcc.astype(np.float32, copy=False)).unsqueeze(0)
+        valid_t = torch.from_numpy(valid.astype(np.float32, copy=False)).unsqueeze(0)
 
         meta = {
             "path": dem_path,
@@ -678,12 +1005,38 @@ class DEMLCCPairDataset(Dataset):
             "global_norm_method": self.norm_method,
             "global_norm_a": float(self.norm_a),
             "global_norm_b": float(self.norm_b),
+            "nodata_value": float(self.nodata) if self.nodata is not None else float('nan'),
+            "nodata_threshold": (
+                float(self.nodata_threshold)
+                if self.nodata_threshold is not None else float('nan')
+            ),
+            "valid_pixel_ratio": float(valid.mean()),
             "lcc_pixel_ratio": lcc_pixel_ratio,
-            "lcc_patch_ratio": lcc_patch_ratio,
+            # Keep old key for compatibility, but it now means usable prediction
+            # patches after removing every patch containing any NoData pixel.
+            "lcc_patch_ratio": prediction_patch_ratio,
+            "candidate_lcc_patch_ratio": candidate_patch_ratio,
+            "prediction_patch_ratio": prediction_patch_ratio,
+            "visible_valid_patch_ratio": visible_valid_patch_ratio,
+            "ignored_patch_ratio": ignored_patch_ratio,
+            "loss_region_mode": self.loss_region_mode,
+            "core_patch_radius": int(self.core_patch_radius),
+            "core_valid_patch_ratio": float(
+                core_metrics["core_valid_patch_ratio"]
+            ),
+            "core_prediction_patch_ratio": float(
+                core_metrics["core_prediction_patch_ratio"]
+            ),
+            "core_valid_patch_count": int(
+                core_metrics["core_valid_patch_count"]
+            ),
+            "core_prediction_patch_count": int(
+                core_metrics["core_prediction_patch_count"]
+            ),
         }
 
         if self.return_path:
-            return x, meta, dem_path, lcc_t
+            return x, meta, dem_path, lcc_t, valid_t
         if self.return_meta:
-            return x, meta, lcc_t
-        return x, lcc_t
+            return x, meta, lcc_t, valid_t
+        return x, lcc_t, valid_t

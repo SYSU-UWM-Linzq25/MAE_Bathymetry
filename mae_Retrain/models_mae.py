@@ -183,6 +183,44 @@ class MaskedAutoencoderViT(nn.Module):
         m = F.max_pool2d(lcc_mask.float(), kernel_size=p, stride=p)
         return (m > float(threshold)).flatten(1).float()
 
+    def _valid_patch_from_mask(self, valid_mask):
+        """Return 1 only when every pixel in a patch is valid.
+
+        One NoData pixel invalidates the complete patch. Invalid patches are
+        removed from encoder input and are not prediction/loss/RMSE targets.
+        """
+        p = self.patch_embed.patch_size[0]
+        valid_fraction = F.avg_pool2d(
+            valid_mask.float(), kernel_size=p, stride=p
+        )
+        return (valid_fraction >= (1.0 - 1.0e-6)).flatten(1).float()
+
+    def _core_patch_mask_like(self, patch_mask, imgs, radius: int = 3):
+        """Centered square patch mask used only for optional core loss.
+
+        The encoder still receives every valid known patch across the full
+        tile, and all usable river patches across the full tile remain masked
+        from the encoder. Only the loss/evaluation mask is restricted.
+        """
+        p = self.patch_embed.patch_size[0]
+        gh = int(imgs.shape[-2] // p)
+        gw = int(imgs.shape[-1] // p)
+        if gh * gw != patch_mask.shape[1]:
+            raise ValueError(
+                f"Patch grid mismatch: {gh}x{gw} vs L={patch_mask.shape[1]}"
+            )
+        r = int(radius)
+        if r < 0:
+            raise ValueError(f"core_patch_radius must be >= 0, got {r}")
+        cy, cx = gh // 2, gw // 2
+        y0, y1 = max(0, cy - r), min(gh, cy + r + 1)
+        x0, x1 = max(0, cx - r), min(gw, cx + r + 1)
+        core = torch.zeros(
+            (gh, gw), device=patch_mask.device, dtype=patch_mask.dtype
+        )
+        core[y0:y1, x0:x1] = 1
+        return core.flatten().unsqueeze(0).expand_as(patch_mask)
+
     def lcc_priority_masking(self, x, mask_ratio, lcc_patch, priority=10.0):
         """
         Fixed-ratio LCC-priority masking. This is kept for compatibility with
@@ -235,48 +273,56 @@ class MaskedAutoencoderViT(nn.Module):
         x = self.norm(x)
         return x, mask, ids_restore, lcc_patch
 
-    def forward_lcc_exact(self, imgs, lcc_mask, lcc_patch_threshold=0.5):
-        """
-        Exact LCC masking for real bathymetry downstream adaptation.
+    def forward_lcc_exact(
+        self, imgs, lcc_mask, valid_mask=None, lcc_patch_threshold=0.5
+    ):
+        """Exact river masking with a third ignored/NoData patch state.
 
-        Important difference from fixed mask_ratio MAE:
-          - The patch mask is determined by each tile's LCC mask.
-          - Therefore the actual mask ratio can vary from tile to tile.
-          - To support variable visible-token counts inside one batch, this
-            function processes the encoder/decoder sample-by-sample and then
-            concatenates predictions back to [N,L,P].
+        Patch states:
+          * visible: valid patch with no river-mask pixel -> encoder input;
+          * prediction: valid patch with >=1 river-mask pixel -> decoder target;
+          * ignored: patch with >=1 NoData pixel -> neither input nor target.
 
-        This is slower than fixed-ratio masking but is the cleanest way to avoid
-        artificially masking extra non-LCC patches just to force a fixed ratio.
+        Ignored patches are absent from both encoder and decoder attention. The
+        returned full-grid prediction tensor contains zeros only as storage
+        placeholders at ignored positions; those positions are never used by
+        loss, RMSE, reconstruction, or visualization.
         """
         x_all = self.patch_embed(imgs)
         x_all = x_all + self.pos_embed[:, 1:, :]
-        lcc_patch = self._lcc_patch_from_mask(lcc_mask, threshold=lcc_patch_threshold)  # [N,L]
+        lcc_patch = self._lcc_patch_from_mask(
+            lcc_mask, threshold=lcc_patch_threshold
+        )  # [N,L]
+
+        if valid_mask is None:
+            valid_patch = torch.ones_like(lcc_patch)
+        else:
+            valid_patch = self._valid_patch_from_mask(valid_mask)
+
+        prediction_patch = lcc_patch.bool() & valid_patch.bool()
+        visible_patch = (~lcc_patch.bool()) & valid_patch.bool()
+        ignored_patch = ~valid_patch.bool()
 
         preds = []
         masks = []
         N, L, D = x_all.shape
         for i in range(N):
-            xi = x_all[i:i + 1]              # [1,L,D]
-            li = lcc_patch[i].bool()         # True = masked/LCC
+            xi = x_all[i:i + 1]
+            ids_keep = torch.nonzero(visible_patch[i], as_tuple=False).flatten()
+            ids_valid = torch.nonzero(
+                valid_patch[i].bool(), as_tuple=False
+            ).flatten()
 
-            ids_keep = torch.nonzero(~li, as_tuple=False).flatten()
-            ids_mask = torch.nonzero(li, as_tuple=False).flatten()
-
-            # Extremely defensive fallback: if the whole tile is LCC, keep one
-            # token so the encoder has at least one non-cls token.
             if ids_keep.numel() == 0:
-                ids_keep = ids_mask[:1]
-                ids_mask = ids_mask[1:]
-                li = torch.ones(L, device=imgs.device, dtype=torch.bool)
-                li[ids_keep] = False
-
-            ids_shuffle = torch.cat([ids_keep, ids_mask], dim=0)  # keep first, mask after
-            ids_restore = torch.argsort(ids_shuffle, dim=0).unsqueeze(0)  # [1,L]
+                raise RuntimeError(
+                    'A tile has zero valid visible patches after NoData removal. '
+                    'Increase data quality or filter it with '
+                    '--min_valid_visible_patch_ratio.'
+                )
 
             x_masked = torch.gather(
                 xi, dim=1,
-                index=ids_keep.view(1, -1, 1).repeat(1, 1, D)
+                index=ids_keep.view(1, -1, 1).repeat(1, 1, D),
             )
 
             cls_token = self.cls_token + self.pos_embed[:, :1, :]
@@ -288,13 +334,60 @@ class MaskedAutoencoderViT(nn.Module):
             latent = self.norm(latent)
             latent = self._apply_bottleneck_norm(latent)
 
-            pred_i = self.forward_decoder(latent, ids_restore)  # [1,L,P]
+            # Decode only valid patches. Ignored/NoData patches are absent from
+            # decoder self-attention, not merely excluded from the loss.
+            pred_i = self.forward_decoder_valid_subset(
+                latent, ids_keep=ids_keep, ids_valid=ids_valid, full_length=L
+            )
             preds.append(pred_i)
-            masks.append(li.float().view(1, L))
+            masks.append(prediction_patch[i].float().view(1, L))
 
         pred = torch.cat(preds, dim=0)
         mask = torch.cat(masks, dim=0)
-        return pred, mask, lcc_patch
+        return pred, mask, lcc_patch, valid_patch
+
+    def forward_decoder_valid_subset(
+        self, latent, ids_keep, ids_valid, full_length
+    ):
+        """Decode only valid patches, then scatter to the full patch grid.
+
+        ``ids_keep`` are the visible valid patch indices in encoder-token order.
+        ``ids_valid`` are all valid patch indices in spatial order. Invalid
+        patches never enter decoder attention.
+        """
+        x = self.decoder_embed(latent)
+        n_valid = int(ids_valid.numel())
+        if n_valid <= 0:
+            raise RuntimeError('No valid patches available for decoder.')
+
+        # Under AMP/autocast, ``x`` may be float16 while the learnable
+        # mask token and positional embeddings remain float32 parameters.
+        # Indexed assignment does not perform autocast automatically, so
+        # explicitly align these tensors with the decoder activation dtype.
+        mask_token = self.mask_token.to(device=x.device, dtype=x.dtype)
+        decoder_pos_embed = self.decoder_pos_embed.to(
+            device=x.device, dtype=x.dtype
+        )
+
+        tokens = mask_token.repeat(1, n_valid, 1)
+        local_keep = torch.searchsorted(ids_valid, ids_keep)
+        tokens[:, local_keep, :] = x[:, 1:, :]
+
+        cls = x[:, :1, :] + decoder_pos_embed[:, :1, :]
+        pos_valid = decoder_pos_embed[:, ids_valid + 1, :]
+        tokens = tokens + pos_valid
+        x = torch.cat([cls, tokens], dim=1)
+
+        for blk in self.decoder_blocks:
+            x = blk(x)
+        x = self.decoder_norm(x)
+        x = self.decoder_pred(x)[:, 1:, :]
+
+        full = x.new_zeros(
+            (1, int(full_length), self.patch_embed.patch_size[0] ** 2 * self.in_chans)
+        )
+        full[:, ids_valid, :] = x
+        return full
 
     def forward_decoder(self, x, ids_restore):
         # embed tokens
@@ -315,12 +408,15 @@ class MaskedAutoencoderViT(nn.Module):
         # remove cls token
         x = x[:, 1:, :]
         return x
-    def forward_loss(self, imgs, pred, mask, lcc_patch=None, loss_on_lcc_only=False):
-        """
-        imgs: [N, C, H, W]
-        pred: [N, L, p*p*C]
-        mask: [N, L], 0 is keep, 1 is remove
-        lcc_patch: optional [N,L], 1 is LCC/river patch
+    def forward_loss(
+        self, imgs, pred, loss_mask, lcc_patch=None, valid_patch=None,
+        loss_on_lcc_only=False,
+    ):
+        """MSE only on usable prediction patches.
+
+        ``loss_mask`` is either all usable river prediction patches or only
+        their centered core subset, depending on ``loss_region_mode``. A patch
+        with any NoData pixel has valid_patch=0 and cannot contribute.
         """
         target = self.patchify(imgs)
         if self.norm_pix_loss:
@@ -329,20 +425,20 @@ class MaskedAutoencoderViT(nn.Module):
             target = (target - mean) / (var + 1.e-6)**.5
 
         loss = (pred - target) ** 2
-        loss = loss.mean(dim=-1)  # [N, L], mean loss per patch
+        loss = loss.mean(dim=-1)  # [N,L]
 
-        if loss_on_lcc_only and (lcc_patch is not None):
-            weight = mask.float() * lcc_patch.float()
-            denom = weight.sum()
-            if denom > 0:
-                return (loss * weight).sum() / denom
+        weight = loss_mask.float()
+        if valid_patch is not None:
+            weight = weight * valid_patch.float()
+        if loss_on_lcc_only and lcc_patch is not None:
+            weight = weight * lcc_patch.float()
 
-        denom = mask.float().sum()
+        denom = weight.sum()
         if denom > 0:
-            return (loss * mask.float()).sum() / denom
+            return (loss * weight).sum() / denom
 
-        # Batch has no masked patches, e.g. all samples have empty LCC masks in
-        # exact mode. Return a differentiable zero rather than NaN.
+        # Differentiable zero for a defensive empty batch. Dataset filtering
+        # should normally prevent this situation.
         return loss.mean() * 0.0
 
     def _apply_bottleneck_norm(self, latent: torch.Tensor) -> torch.Tensor:
@@ -355,8 +451,10 @@ class MaskedAutoencoderViT(nn.Module):
         return torch.cat([cls, tok], dim=1)
 
     def forward(self, imgs, mask_ratio=0.75, file_name="", lcc_mask=None,
-                loss_on_lcc_only=False, lcc_priority=10.0,
-                lcc_mask_mode="none", lcc_patch_threshold=0.5):
+                valid_mask=None, loss_on_lcc_only=False, lcc_priority=10.0,
+                lcc_mask_mode="none", lcc_patch_threshold=0.5,
+                loss_region_mode="all", core_patch_radius=3,
+                return_aux_masks=False):
         """
         lcc_mask_mode:
           - "none"     : ignore lcc_mask and use random MAE masking
@@ -365,11 +463,25 @@ class MaskedAutoencoderViT(nn.Module):
                          actual mask ratio varies by tile
         """
         if lcc_mask is not None and lcc_mask_mode == "exact":
-            pred, mask, lcc_patch = self.forward_lcc_exact(
-                imgs, lcc_mask=lcc_mask, lcc_patch_threshold=lcc_patch_threshold
+            pred, prediction_mask, lcc_patch, valid_patch = self.forward_lcc_exact(
+                imgs, lcc_mask=lcc_mask, valid_mask=valid_mask,
+                lcc_patch_threshold=lcc_patch_threshold,
             )
+            mode = str(loss_region_mode).lower()
+            if mode == "all":
+                loss_mask = prediction_mask
+            elif mode == "core":
+                core_mask = self._core_patch_mask_like(
+                    prediction_mask, imgs, radius=core_patch_radius
+                )
+                loss_mask = prediction_mask * core_mask
+            else:
+                raise ValueError(
+                    f"loss_region_mode must be 'all' or 'core', got {loss_region_mode}"
+                )
         else:
-            latent, mask, ids_restore, lcc_patch = self.forward_encoder(
+            valid_patch = None
+            latent, prediction_mask, ids_restore, lcc_patch = self.forward_encoder(
                 imgs, mask_ratio,
                 lcc_mask=lcc_mask,
                 lcc_priority=lcc_priority,
@@ -380,13 +492,17 @@ class MaskedAutoencoderViT(nn.Module):
             if self.save_path != "" and file_name != "":
                 torch.save(latent, f'{self.save_path}/{file_name}_latent.pt')
             pred = self.forward_decoder(latent, ids_restore)  # [N, L, p*p*C]
+            loss_mask = prediction_mask
 
         loss = self.forward_loss(
-            imgs, pred, mask,
+            imgs, pred, loss_mask,
             lcc_patch=lcc_patch,
+            valid_patch=valid_patch,
             loss_on_lcc_only=loss_on_lcc_only,
         )
-        return loss, pred, mask
+        if return_aux_masks:
+            return loss, pred, loss_mask, prediction_mask
+        return loss, pred, loss_mask
         
 def mae_vit_base_patch16_dec512d8b(**kwargs):
     model = MaskedAutoencoderViT(

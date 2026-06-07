@@ -137,9 +137,16 @@ def visualize_fixed_tiles_geotiff(model, dataset, idxs: np.ndarray, device, epoc
         sample = dataset[int(idx)]
 
         lcc_mask = None
+        valid_mask = None
         if isinstance(sample, (tuple, list)):
-            if len(sample) == 4:
-                x, meta, ref_path, lcc_mask = sample
+            if len(sample) >= 5:
+                x, meta, ref_path, lcc_mask, valid_mask = sample[:5]
+            elif len(sample) == 4:
+                if torch.is_tensor(sample[2]) and torch.is_tensor(sample[3]):
+                    x, meta, lcc_mask, valid_mask = sample
+                    ref_path = meta["path"] if isinstance(meta, dict) and "path" in meta else dataset.files[int(idx)]
+                else:
+                    x, meta, ref_path, lcc_mask = sample
             elif len(sample) == 3:
                 if torch.is_tensor(sample[2]):
                     x, meta, lcc_mask = sample
@@ -161,6 +168,8 @@ def visualize_fixed_tiles_geotiff(model, dataset, idxs: np.ndarray, device, epoc
         x = x.unsqueeze(0).to(device, non_blocking=True)  # [1,1,H,W]
         if lcc_mask is not None:
             lcc_mask = lcc_mask.unsqueeze(0).to(device, non_blocking=True)
+        if valid_mask is not None:
+            valid_mask = valid_mask.unsqueeze(0).to(device, non_blocking=True)
 
         # fixed visualization mask per tile
         cpu_state = torch.random.get_rng_state()
@@ -173,16 +182,22 @@ def visualize_fixed_tiles_geotiff(model, dataset, idxs: np.ndarray, device, epoc
 
         with torch.cuda.amp.autocast(enabled=getattr(args, "amp", True)):
             if lcc_mask is not None:
-                _, pred, mask = model(
+                _, pred, mask, prediction_mask = model(
                     x, mask_ratio=args.mask_ratio,
                     lcc_mask=lcc_mask,
+                    valid_mask=valid_mask,
                     loss_on_lcc_only=getattr(args, "loss_on_lcc_only", False),
                     lcc_priority=getattr(args, "lcc_priority", 10.0),
                     lcc_mask_mode=getattr(args, "lcc_mask_mode", "exact"),
                     lcc_patch_threshold=getattr(args, "lcc_patch_threshold", 0.5),
+                    loss_region_mode=getattr(args, "loss_region_mode", "all"),
+                    core_patch_radius=getattr(args, "core_patch_radius", 3),
+                    return_aux_masks=True,
                 )
             else:
-                _, pred, mask = model(x, mask_ratio=args.mask_ratio)
+                _, pred, mask, prediction_mask = model(
+                    x, mask_ratio=args.mask_ratio, return_aux_masks=True
+                )
 
         # restore RNG states so visualization does not affect later randomness
         torch.random.set_rng_state(cpu_state)
@@ -193,16 +208,27 @@ def visualize_fixed_tiles_geotiff(model, dataset, idxs: np.ndarray, device, epoc
         pred_img = model.unpatchify(pred)[0, 0].float().cpu()  # [H,W]
         p = model.patch_embed.patch_size[0]
         mask_img = mask.unsqueeze(-1).repeat(1, 1, p * p * args.in_chans)
-        mask_img = model.unpatchify(mask_img)[0, 0].float().cpu()  # [H,W], 1=masked
+        mask_img = model.unpatchify(mask_img)[0, 0].float().cpu()  # loss/eval region
+        prediction_mask_img = prediction_mask.unsqueeze(-1).repeat(
+            1, 1, p * p * args.in_chans
+        )
+        prediction_mask_img = model.unpatchify(prediction_mask_img)[0, 0].float().cpu()
         x0 = x[0, 0].float().cpu()
-        recon = x0 * (1 - mask_img) + pred_img * mask_img
+        # The model masks/predicts usable river patches across the full tile.
+        # Core mode changes only where loss/RMSE are computed.
+        recon = x0 * (1 - prediction_mask_img) + pred_img * prediction_mask_img
 
         # patch-space visible median bias correction
         target_patch = model.patchify(x)[0].float().cpu()   # [L,P]
         pred_patch = pred[0].float().cpu()                  # [L,P]
-        mask_patch = mask[0].float().cpu()                  # [L]
+        mask_patch = mask[0].float().cpu()                  # core/all loss mask [L]
+        prediction_mask_patch = prediction_mask[0].float().cpu()
 
-        keep_patch = (mask_patch == 0)
+        if valid_mask is not None:
+            valid_patch = model._valid_patch_from_mask(valid_mask)[0].bool().cpu()
+        else:
+            valid_patch = torch.ones_like(mask_patch, dtype=torch.bool)
+        keep_patch = (prediction_mask_patch == 0) & valid_patch
         if keep_patch.sum() > 0:
             vis_bias = (pred_patch[keep_patch] - target_patch[keep_patch]).reshape(-1).median()
         else:
@@ -210,7 +236,10 @@ def visualize_fixed_tiles_geotiff(model, dataset, idxs: np.ndarray, device, epoc
 
         pred_patch_corr = pred_patch - vis_bias
         pred_corr_img = model.unpatchify(pred_patch_corr.unsqueeze(0).to(device))[0, 0].float().cpu()
-        recon_corr = x0 * (1 - mask_img) + pred_corr_img * mask_img
+        recon_corr = (
+            x0 * (1 - prediction_mask_img)
+            + pred_corr_img * prediction_mask_img
+        )
 
         gt_m = _denorm(x0, meta, args).cpu()
         pred_m = _denorm(pred_img, meta, args).cpu()
@@ -228,30 +257,55 @@ def visualize_fixed_tiles_geotiff(model, dataset, idxs: np.ndarray, device, epoc
         recon_np = recon_m.numpy().astype(np.float32, copy=False)
         err_np = err_m.numpy().astype(np.float32, copy=False)
         mask_np = (mask_img.numpy() > 0.5).astype(np.uint8)
+        prediction_mask_np = (
+            prediction_mask_img.numpy() > 0.5
+        ).astype(np.uint8)
         pred_corr_np = pred_corr_m.numpy().astype(np.float32, copy=False)
         recon_corr_np = recon_corr_m.numpy().astype(np.float32, copy=False)
         err_corr_np = err_corr_m.numpy().astype(np.float32, copy=False)
 
-        base = f"idx{int(idx):06d}"
-        _write_geotiff_like(ref_path, out_epoch / f"{base}_gt_m.tif", gt_np, dtype="float32", nodata=None)
-        _write_geotiff_like(ref_path, out_epoch / f"{base}_pred_m.tif", pred_np, dtype="float32", nodata=None)
-        _write_geotiff_like(ref_path, out_epoch / f"{base}_recon_m.tif", recon_np, dtype="float32", nodata=None)
-        _write_geotiff_like(ref_path, out_epoch / f"{base}_err_m.tif", err_np, dtype="float32", nodata=None)
+        if valid_mask is not None:
+            valid_np = (
+                valid_mask[0, 0].float().detach().cpu().numpy() > 0.5
+            ).astype(np.uint8)
+        else:
+            valid_np = np.ones_like(mask_np, dtype=np.uint8)
 
-        _write_geotiff_like(ref_path, out_epoch / f"{base}_pred_viscorr_m.tif", pred_corr_np, dtype="float32", nodata=None)
-        _write_geotiff_like(ref_path, out_epoch / f"{base}_recon_viscorr_m.tif", recon_corr_np, dtype="float32", nodata=None)
-        _write_geotiff_like(ref_path, out_epoch / f"{base}_err_viscorr_m.tif", err_corr_np, dtype="float32", nodata=None)
+        output_nodata = (
+            float(args.nodata) if getattr(args, "nodata", None) is not None
+            else -999999.0
+        )
+        invalid = valid_np == 0
+        # Never visualize a tensor placeholder as 0 m ground truth.
+        for a in (gt_np, pred_np, recon_np, err_np, pred_corr_np,
+                  recon_corr_np, err_corr_np):
+            a[invalid] = output_nodata
+        mask_np[invalid] = 0
+        prediction_mask_np[invalid] = 0
+
+        base = f"idx{int(idx):06d}"
+        _write_geotiff_like(ref_path, out_epoch / f"{base}_gt_m.tif", gt_np, dtype="float32", nodata=output_nodata)
+        _write_geotiff_like(ref_path, out_epoch / f"{base}_pred_m.tif", pred_np, dtype="float32", nodata=output_nodata)
+        _write_geotiff_like(ref_path, out_epoch / f"{base}_recon_m.tif", recon_np, dtype="float32", nodata=output_nodata)
+        _write_geotiff_like(ref_path, out_epoch / f"{base}_err_m.tif", err_np, dtype="float32", nodata=output_nodata)
+
+        _write_geotiff_like(ref_path, out_epoch / f"{base}_pred_viscorr_m.tif", pred_corr_np, dtype="float32", nodata=output_nodata)
+        _write_geotiff_like(ref_path, out_epoch / f"{base}_recon_viscorr_m.tif", recon_corr_np, dtype="float32", nodata=output_nodata)
+        _write_geotiff_like(ref_path, out_epoch / f"{base}_err_viscorr_m.tif", err_corr_np, dtype="float32", nodata=output_nodata)
 
         _write_geotiff_like(ref_path, out_epoch / f"{base}_mask.tif", mask_np, dtype="uint8", nodata=0)
+        _write_geotiff_like(ref_path, out_epoch / f"{base}_prediction_mask.tif", prediction_mask_np, dtype="uint8", nodata=0)
+        _write_geotiff_like(ref_path, out_epoch / f"{base}_valid_mask.tif", valid_np, dtype="uint8", nodata=0)
         if lcc_mask is not None:
             lcc_np = (lcc_mask[0, 0].float().detach().cpu().numpy() > 0.5).astype(np.uint8)
             _write_geotiff_like(ref_path, out_epoch / f"{base}_lcc_input_mask.tif", lcc_np, dtype="uint8", nodata=0)
 
         # output Histogram and scatter to help evaluation
         # masked-only diagnostics
-        masked_vals_gt = gt_np[mask_np > 0]
-        masked_vals_recon = recon_np[mask_np > 0]
-        masked_vals_recon_corr = recon_corr_np[mask_np > 0]
+        eval_pixels = (mask_np > 0) & (valid_np > 0)
+        masked_vals_gt = gt_np[eval_pixels]
+        masked_vals_recon = recon_np[eval_pixels]
+        masked_vals_recon_corr = recon_corr_np[eval_pixels]
         if masked_vals_gt.size > 0:
             masked_err = masked_vals_recon - masked_vals_gt
             masked_err_corr = masked_vals_recon_corr - masked_vals_gt
@@ -313,7 +367,23 @@ def get_args_parser():
     parser.add_argument('--min_lcc_patch_ratio', default=0.0, type=float,
                         help='Optional filter: drop tiles whose LCC patch ratio is below this value.')
     parser.add_argument('--max_lcc_patch_ratio', default=1.0, type=float,
-                        help='Optional filter: drop tiles whose LCC patch ratio is above this value.')
+                        help='Drop tiles whose usable prediction-patch ratio is above this value.')
+    parser.add_argument('--min_valid_visible_patch_ratio', default=0.0, type=float,
+                        help='After removing every patch containing any NoData pixel, drop a tile '
+                             'when its valid visible/known patch ratio is below this value. '
+                             'For the current 336/16 setup, 0.70 is a conservative starting point.')
+    parser.add_argument('--loss_region_mode', default='all', choices=['all', 'core'],
+                        help='all=loss/RMSE on every usable prediction patch; '
+                             'core=mask/predict across the full tile but compute loss/RMSE '
+                             'only on the centered core patch window.')
+    parser.add_argument('--core_patch_radius', default=3, type=int,
+                        help='Half-width of centered core in patch units. Radius 3 gives 7x7 patches.')
+    parser.add_argument('--min_core_valid_patch_ratio', default=0.0, type=float,
+                        help='Core mode tile filter: minimum fraction of all core patches that are fully valid.')
+    parser.add_argument('--min_core_prediction_patch_ratio', default=0.0, type=float,
+                        help='Core mode tile filter: minimum prediction-patch fraction among valid core patches.')
+    parser.add_argument('--max_core_prediction_patch_ratio', default=1.0, type=float,
+                        help='Core mode tile filter: maximum prediction-patch fraction among valid core patches.')
     parser.add_argument('--extra_eval_dir', type=str, default='',
                         help='An extra directory to evaluate at the end (e.g., KY holdout tiles).')
 
@@ -324,7 +394,10 @@ def get_args_parser():
 
     # Nodata handling
     parser.add_argument('--nodata', default=-9999.0, type=float,
-                        help='Nodata value in tiles (e.g., -9999). If set, nodata pixels are filled by tile mean.')
+                        help='Declared NoData value in input tiles.')
+    parser.add_argument('--nodata_threshold', default=-9999.0, type=float,
+                        help='Robust NoData rule: values <= this threshold are invalid. '
+                             'This catches -9999, -99999, and -999999 sentinels.')
 
     # --- normalization ---
     parser.add_argument('--norm_method', default='meanstd', choices=['meanstd', 'minmax'],
@@ -616,7 +689,16 @@ def main(args):
             f'tile_norm={args.tile_norm}, '
             f'tile_norm_visible_only={args.tile_norm_visible_only}, '
             f'tile_norm_std_scale={args.tile_norm_std_scale}, '
-            f'tile_norm_eps={args.tile_norm_eps}'
+            f'tile_norm_eps={args.tile_norm_eps}, '
+            f'nodata={args.nodata}, '
+            f'nodata_threshold={args.nodata_threshold}, '
+            f'min_valid_visible_patch_ratio={args.min_valid_visible_patch_ratio}, '
+            f'loss_region_mode={args.loss_region_mode}, '
+            f'core_patch_radius={args.core_patch_radius}, '
+            f'core_valid_min={args.min_core_valid_patch_ratio}, '
+            f'core_prediction_range=['
+            f'{args.min_core_prediction_patch_ratio},'
+            f'{args.max_core_prediction_patch_ratio}]'
         )
         
     def _make_dataset(split_name: str, random_flip: bool, return_path: bool):
@@ -631,6 +713,7 @@ def main(args):
                 lcc_list_path=lcc_list if lcc_list else None,
                 input_size=args.input_size,
                 nodata=args.nodata,
+                nodata_threshold=args.nodata_threshold,
                 random_flip=random_flip,
                 return_path=return_path,
                 tile_norm=args.tile_norm,
@@ -640,6 +723,12 @@ def main(args):
                 tile_norm_visible_only=args.tile_norm_visible_only,
                 min_lcc_patch_ratio=args.min_lcc_patch_ratio,
                 max_lcc_patch_ratio=args.max_lcc_patch_ratio,
+                min_valid_visible_patch_ratio=args.min_valid_visible_patch_ratio,
+                loss_region_mode=args.loss_region_mode,
+                core_patch_radius=args.core_patch_radius,
+                min_core_valid_patch_ratio=args.min_core_valid_patch_ratio,
+                min_core_prediction_patch_ratio=args.min_core_prediction_patch_ratio,
+                max_core_prediction_patch_ratio=args.max_core_prediction_patch_ratio,
                 patch_size=16,
                 lcc_patch_threshold=args.lcc_patch_threshold,
             )
@@ -648,6 +737,7 @@ def main(args):
             list_path=dem_list if dem_list else '',
             input_size=args.input_size,
             nodata=args.nodata,
+            nodata_threshold=args.nodata_threshold,
             random_flip=random_flip,
             return_path=return_path,
             tile_norm=args.tile_norm,
@@ -681,6 +771,7 @@ def main(args):
             dem_norm = compute_dem_stats(
                 train_ds.files,
                 nodata=args.nodata,
+                nodata_threshold=args.nodata_threshold,
                 max_files=max_files,
                 method=args.norm_method,
             )
@@ -952,6 +1043,8 @@ def main(args):
                     'val_bias_m_vis_med': float(val_stats.get('bias_m_vis_med', nan)),
                     'train_actual_mask_ratio': float(train_stats.get('actual_mask_ratio', nan)),
                     'val_actual_mask_ratio': float(val_stats.get('actual_mask_ratio', nan)),
+                    'train_actual_prediction_mask_ratio': float(train_stats.get('actual_prediction_mask_ratio', nan)),
+                    'val_actual_prediction_mask_ratio': float(val_stats.get('actual_prediction_mask_ratio', nan)),
                 })
     
             # replace existing epoch row if present (safe for resume)
@@ -966,6 +1059,7 @@ def main(args):
                   'train_rmse_m_mask_viscorr','val_rmse_m_mask_viscorr','train_rmse_m_all_viscorr','val_rmse_m_all_viscorr',
                   'train_bias_m_vis_med','val_bias_m_vis_med',
                   'train_actual_mask_ratio','val_actual_mask_ratio',
+                  'train_actual_prediction_mask_ratio','val_actual_prediction_mask_ratio',
                 ]
             _save_history(history_csv, history, fieldnames)
 
@@ -1038,6 +1132,7 @@ def main(args):
                 lcc_list_path=lcc_list_path if lcc_list_path else None,
                 input_size=args.input_size,
                 nodata=args.nodata,
+                nodata_threshold=args.nodata_threshold,
                 random_flip=False,
                 return_path=False,
                 tile_norm=args.tile_norm,
@@ -1047,6 +1142,12 @@ def main(args):
                 tile_norm_visible_only=args.tile_norm_visible_only,
                 min_lcc_patch_ratio=args.min_lcc_patch_ratio,
                 max_lcc_patch_ratio=args.max_lcc_patch_ratio,
+                min_valid_visible_patch_ratio=args.min_valid_visible_patch_ratio,
+                loss_region_mode=args.loss_region_mode,
+                core_patch_radius=args.core_patch_radius,
+                min_core_valid_patch_ratio=args.min_core_valid_patch_ratio,
+                min_core_prediction_patch_ratio=args.min_core_prediction_patch_ratio,
+                max_core_prediction_patch_ratio=args.max_core_prediction_patch_ratio,
                 patch_size=16,
                 lcc_patch_threshold=args.lcc_patch_threshold,
             )
@@ -1056,6 +1157,7 @@ def main(args):
                 list_path=list_path if list_path else None,
                 input_size=args.input_size,
                 nodata=args.nodata,
+                nodata_threshold=args.nodata_threshold,
                 random_flip=False,
                 return_path=False,
                 tile_norm=args.tile_norm,
