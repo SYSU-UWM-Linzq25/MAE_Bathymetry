@@ -38,7 +38,7 @@ import util.misc as misc
 from util.misc import NativeScalerWithGradNormCount as NativeScaler
 import models_mae
 from engine_pretrain import train_one_epoch, evaluate_one_epoch
-from util.dem_dataset import DEMTileDataset, DEMLCCPairDataset, compute_dem_stats, load_json, save_json
+from util.dem_dataset import DEMTileDataset, DEMLCCPairDataset, DEMDualMaskDataset, compute_dem_stats, load_json, save_json
 
 def _denorm(x: torch.Tensor, meta: dict, args) -> torch.Tensor:
     """
@@ -354,6 +354,34 @@ def get_args_parser():
     parser.add_argument('--train_lcc_list', type=str, default='', help='TXT list of train LCC mask paths, line-by-line paired with --train_list')
     parser.add_argument('--val_lcc_list', type=str, default='', help='TXT list of val LCC mask paths, line-by-line paired with --val_list')
     parser.add_argument('--test_lcc_list', type=str, default='', help='TXT list of test LCC mask paths, line-by-line paired with --test_list')
+
+    # --- MAE v2 dual-mask pairing: merged DEM + Hidden mask + pixel Loss mask ---
+    parser.add_argument('--hidden_mask_path', type=str, default='',
+                        help='Root folder containing Hidden_Mask GeoTIFFs paired with Train_tile by filename key. '
+                             'Hidden mask controls which patches are hidden from the encoder.')
+    parser.add_argument('--loss_mask_path', type=str, default='',
+                        help='Root folder containing Loss_Mask_Pixel GeoTIFFs paired with Train_tile by filename key. '
+                             'Loss mask is pixel-level and controls which pixels contribute to MSE loss.')
+    parser.add_argument('--train_hidden_list', type=str, default='',
+                        help='TXT list of train hidden-mask paths, line-by-line paired with --train_list')
+    parser.add_argument('--val_hidden_list', type=str, default='',
+                        help='TXT list of val hidden-mask paths, line-by-line paired with --val_list')
+    parser.add_argument('--test_hidden_list', type=str, default='',
+                        help='TXT list of test hidden-mask paths, line-by-line paired with --test_list')
+    parser.add_argument('--train_loss_list', type=str, default='',
+                        help='TXT list of train pixel-loss-mask paths, line-by-line paired with --train_list')
+    parser.add_argument('--val_loss_list', type=str, default='',
+                        help='TXT list of val pixel-loss-mask paths, line-by-line paired with --val_list')
+    parser.add_argument('--test_loss_list', type=str, default='',
+                        help='TXT list of test pixel-loss-mask paths, line-by-line paired with --test_list')
+    parser.add_argument('--min_loss_pixel_count', default=1, type=int,
+                        help='Dual-mask dataset safety filter: minimum loss=1 pixels per tile.')
+    parser.add_argument('--min_loss_pixel_ratio', default=0.0, type=float,
+                        help='Dual-mask dataset safety filter: minimum loss=1 pixel ratio per tile.')
+    parser.add_argument('--min_core_loss_pixel_count', default=0, type=int,
+                        help='Optional dual-mask safety filter: minimum loss=1 pixels inside centered core box.')
+    parser.add_argument('--min_core_loss_pixel_ratio', default=0.0, type=float,
+                        help='Optional dual-mask safety filter: minimum loss=1 pixel ratio inside centered core box.')
     parser.add_argument('--lcc_mask_mode', default='exact', choices=['none', 'priority', 'exact'],
                         help='none=random MAE mask; priority=fixed mask_ratio but prioritize LCC; exact=mask exactly LCC patches, variable ratio per tile.')
     parser.add_argument('--loss_on_lcc_only', action='store_true',
@@ -679,10 +707,41 @@ def main(args):
     val_dir = _resolve_split_dir(args.data_root, 'val', args.val_dir)
     test_dir = _resolve_split_dir(args.data_root, 'test', args.test_dir)
 
-    use_lcc = bool(args.lcc_mask_path or args.train_lcc_list or args.val_lcc_list or args.test_lcc_list)
-    if use_lcc and args.lcc_mask_mode == 'none':
-        print('[WARN] LCC masks are provided but --lcc_mask_mode none; masks will be loaded but ignored by the model.')
-    if use_lcc:
+    use_dual_masks = bool(
+        args.hidden_mask_path or args.loss_mask_path
+        or args.train_hidden_list or args.val_hidden_list or args.test_hidden_list
+        or args.train_loss_list or args.val_loss_list or args.test_loss_list
+    )
+    use_lcc = (not use_dual_masks) and bool(
+        args.lcc_mask_path or args.train_lcc_list or args.val_lcc_list or args.test_lcc_list
+    )
+
+    if use_dual_masks:
+        if not (
+            (args.hidden_mask_path or args.train_hidden_list or args.val_hidden_list or args.test_hidden_list)
+            and (args.loss_mask_path or args.train_loss_list or args.val_loss_list or args.test_loss_list)
+        ):
+            raise ValueError('Dual-mask mode requires both hidden masks and pixel loss masks.')
+        if args.lcc_mask_mode != 'exact':
+            print('[WARN] Dual-mask mode should normally use --lcc_mask_mode exact; overriding behavior is not recommended.')
+        print(
+            f'[DATA] Using MAE v2 dual masks: DEM + Hidden_Mask + Loss_Mask_Pixel. '
+            f'mode={args.lcc_mask_mode}, '
+            f'tile_norm={args.tile_norm}, '
+            f'tile_norm_visible_only={args.tile_norm_visible_only}, '
+            f'tile_norm_std_scale={args.tile_norm_std_scale}, '
+            f'tile_norm_eps={args.tile_norm_eps}, '
+            f'nodata={args.nodata}, '
+            f'nodata_threshold={args.nodata_threshold}, '
+            f'min_valid_visible_patch_ratio={args.min_valid_visible_patch_ratio}, '
+            f'min_loss_pixel_count={args.min_loss_pixel_count}, '
+            f'min_loss_pixel_ratio={args.min_loss_pixel_ratio}, '
+            f'min_core_loss_pixel_count={args.min_core_loss_pixel_count}, '
+            f'min_core_loss_pixel_ratio={args.min_core_loss_pixel_ratio}'
+        )
+    elif use_lcc:
+        if args.lcc_mask_mode == 'none':
+            print('[WARN] LCC masks are provided but --lcc_mask_mode none; masks will be loaded but ignored by the model.')
         print(
             f'[DATA] Using paired DEM/bathy + LCC masks. '
             f'mode={args.lcc_mask_mode}, '
@@ -705,6 +764,37 @@ def main(args):
         dem_dir = {'train': train_dir, 'val': val_dir, 'test': test_dir}[split_name]
         dem_list = getattr(args, f'{split_name}_list')
         lcc_list = getattr(args, f'{split_name}_lcc_list')
+        hidden_list = getattr(args, f'{split_name}_hidden_list')
+        loss_list = getattr(args, f'{split_name}_loss_list')
+
+        if use_dual_masks:
+            return DEMDualMaskDataset(
+                dem_dir=dem_dir if not dem_list else '',
+                hidden_dir=args.hidden_mask_path if args.hidden_mask_path else '',
+                loss_dir=args.loss_mask_path if args.loss_mask_path else '',
+                dem_list_path=dem_list if dem_list else None,
+                hidden_list_path=hidden_list if hidden_list else None,
+                loss_list_path=loss_list if loss_list else None,
+                input_size=args.input_size,
+                nodata=args.nodata,
+                nodata_threshold=args.nodata_threshold,
+                random_flip=random_flip,
+                return_path=return_path,
+                tile_norm=args.tile_norm,
+                tile_norm_eps=args.tile_norm_eps,
+                tile_norm_std_scale=args.tile_norm_std_scale,
+                return_meta=True,
+                tile_norm_visible_only=args.tile_norm_visible_only,
+                min_valid_visible_patch_ratio=args.min_valid_visible_patch_ratio,
+                min_loss_pixel_count=args.min_loss_pixel_count,
+                min_loss_pixel_ratio=args.min_loss_pixel_ratio,
+                min_core_loss_pixel_count=args.min_core_loss_pixel_count,
+                min_core_loss_pixel_ratio=args.min_core_loss_pixel_ratio,
+                core_patch_radius=args.core_patch_radius,
+                patch_size=16,
+                hidden_patch_threshold=args.lcc_patch_threshold,
+            )
+
         if use_lcc:
             return DEMLCCPairDataset(
                 dem_dir=dem_dir if not dem_list else '',

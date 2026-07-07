@@ -28,63 +28,81 @@ def _unwrap_samples(batch):
     return batch
 
 def _unwrap_batch(batch):
-    """Unpack datasets with optional river and validity masks.
+    """Unpack datasets with optional hidden/prediction mask and validity masks.
 
     Returns:
-        samples, meta, path, lcc_mask, valid_mask
+        samples, meta, path, hidden_or_lcc_mask, valid_mask, loss_pixel_mask
+
+    Backward compatibility:
+      * old DEMLCCPairDataset returns no loss_pixel_mask.
+      * new DEMDualMaskDataset returns hidden mask + pixel loss mask.
     """
     if isinstance(batch, dict):
         samples = batch.get("image", batch.get("x"))
         meta = batch.get("meta", None)
         path = batch.get("path", None)
-        lcc_mask = batch.get("lcc_mask", None)
+        hidden_mask = batch.get("hidden_mask", batch.get("lcc_mask", None))
         valid_mask = batch.get("valid_mask", None)
-        return samples, meta, path, lcc_mask, valid_mask
+        loss_pixel_mask = batch.get("loss_pixel_mask", None)
+        return samples, meta, path, hidden_mask, valid_mask, loss_pixel_mask
 
     if not isinstance(batch, (tuple, list)):
-        return batch, None, None, None, None
+        return batch, None, None, None, None, None
 
     if len(batch) == 1:
-        return batch[0], None, None, None, None
+        return batch[0], None, None, None, None, None
 
     if len(batch) == 2:
         if torch.is_tensor(batch[1]):
-            return batch[0], None, None, batch[1], None
+            return batch[0], None, None, batch[1], None, None
         if isinstance(batch[1], dict):
-            return batch[0], batch[1], None, None, None
-        return batch[0], None, batch[1], None, None
+            return batch[0], batch[1], None, None, None, None
+        return batch[0], None, batch[1], None, None, None
 
     if len(batch) == 3:
-        # New no-meta form: (x, lcc_mask, valid_mask)
+        # no-meta form: (x, hidden/lcc_mask, valid_mask)
         if torch.is_tensor(batch[1]) and torch.is_tensor(batch[2]):
-            return batch[0], None, None, batch[1], batch[2]
+            return batch[0], None, None, batch[1], batch[2], None
         if isinstance(batch[1], dict) and torch.is_tensor(batch[2]):
-            return batch[0], batch[1], None, batch[2], None
+            return batch[0], batch[1], None, batch[2], None, None
         if torch.is_tensor(batch[1]) and isinstance(batch[2], dict):
-            return batch[0], batch[2], None, batch[1], None
-        return batch[0], batch[1], batch[2], None, None
+            return batch[0], batch[2], None, batch[1], None, None
+        return batch[0], batch[1], batch[2], None, None, None
 
     if len(batch) == 4:
-        # New paired no-path format: (x, meta, lcc_mask, valid_mask)
+        # (x, hidden, valid, loss_pixel)
+        if all(torch.is_tensor(batch[i]) for i in (1, 2, 3)):
+            return batch[0], None, None, batch[1], batch[2], batch[3]
+        # old/new paired no-path format: (x, meta, lcc/hidden, valid)
         if (isinstance(batch[1], dict) and torch.is_tensor(batch[2])
                 and torch.is_tensor(batch[3])):
-            return batch[0], batch[1], None, batch[2], batch[3]
-        # Old paired path format: (x, meta, path, lcc_mask)
+            return batch[0], batch[1], None, batch[2], batch[3], None
+        # old paired path format: (x, meta, path, lcc)
         if isinstance(batch[1], dict) and torch.is_tensor(batch[3]):
-            return batch[0], batch[1], batch[2], batch[3], None
+            return batch[0], batch[1], batch[2], batch[3], None, None
         if torch.is_tensor(batch[1]):
-            return batch[0], batch[2], batch[3], batch[1], None
-        return batch[0], batch[1], batch[2], None, None
+            return batch[0], batch[2], batch[3], batch[1], None, None
+        return batch[0], batch[1], batch[2], None, None, None
 
-    # New paired path format: (x, meta, path, lcc_mask, valid_mask)
-    if len(batch) >= 5:
+    if len(batch) == 5:
+        # New DEMDualMaskDataset no-path format: (x, meta, hidden, valid, loss_pixel)
+        if (isinstance(batch[1], dict) and torch.is_tensor(batch[2])
+                and torch.is_tensor(batch[3]) and torch.is_tensor(batch[4])):
+            return batch[0], batch[1], None, batch[2], batch[3], batch[4]
+        # Old paired path format: (x, meta, path, lcc, valid)
         if torch.is_tensor(batch[3]) and torch.is_tensor(batch[4]):
-            return batch[0], batch[1], batch[2], batch[3], batch[4]
+            return batch[0], batch[1], batch[2], batch[3], batch[4], None
 
-    return batch[0], None, None, None, None
+    if len(batch) >= 6:
+        # New DEMDualMaskDataset path format: (x, meta, path, hidden, valid, loss_pixel)
+        if (torch.is_tensor(batch[3]) and torch.is_tensor(batch[4])
+                and torch.is_tensor(batch[5])):
+            return batch[0], batch[1], batch[2], batch[3], batch[4], batch[5]
+
+    return batch[0], None, None, None, None, None
 
 
-def _model_forward(model, samples, args, lcc_mask=None, valid_mask=None):
+def _model_forward(model, samples, args, lcc_mask=None, valid_mask=None, loss_pixel_mask=None):
     """Centralized model call so mask rules match train and evaluation."""
     if lcc_mask is not None:
         return model(
@@ -92,6 +110,7 @@ def _model_forward(model, samples, args, lcc_mask=None, valid_mask=None):
             mask_ratio=getattr(args, "mask_ratio", 0.75),
             lcc_mask=lcc_mask,
             valid_mask=valid_mask,
+            loss_pixel_mask=loss_pixel_mask,
             loss_on_lcc_only=getattr(args, "loss_on_lcc_only", False),
             lcc_priority=getattr(args, "lcc_priority", 10.0),
             lcc_mask_mode=getattr(args, "lcc_mask_mode", "exact"),
@@ -104,6 +123,7 @@ def _model_forward(model, samples, args, lcc_mask=None, valid_mask=None):
         samples, mask_ratio=getattr(args, "mask_ratio", 0.75),
         return_aux_masks=True,
     )
+
 
 def _meta_to_tile_std_tensor(meta, device, dtype=torch.float32):
     """
@@ -180,6 +200,44 @@ def _rmse_meters_from_pred(
     return rmse_mask, rmse_all
 
 @torch.no_grad()
+
+@torch.no_grad()
+def _rmse_meters_from_pred_pixel_mask(
+    model, samples, pred, loss_pixel_mask, valid_mask=None, meta=None,
+    norm_scale_m: float = 1.0,
+):
+    """RMSE in meters only on pixel-level loss_mask pixels."""
+    target = model.patchify(samples)
+    err = pred.float() - target.float()
+    pix_w = model.patchify(loss_pixel_mask.float())
+    pix_w = (pix_w > 0.5).float()
+
+    if valid_mask is not None:
+        valid_patch = model._valid_patch_from_mask(valid_mask).float()
+        pix_w = pix_w * valid_patch.unsqueeze(-1)
+
+    if meta is None:
+        err_m = err * float(norm_scale_m)
+    else:
+        tile_std = _meta_to_tile_std_tensor(
+            meta, device=samples.device, dtype=err.dtype
+        )
+        err_m = err * tile_std[:, None, None]
+
+    denom = pix_w.sum().clamp(min=1.0)
+    rmse_mask = torch.sqrt(((err_m ** 2) * pix_w).sum() / denom)
+
+    # Also report all-valid-patch RMSE for context.
+    if valid_mask is None:
+        valid_patch = torch.ones(err.shape[:2], device=err.device, dtype=err.dtype)
+    else:
+        valid_patch = model._valid_patch_from_mask(valid_mask).float()
+    mse_patch = (err_m ** 2).mean(dim=-1)
+    rmse_all = torch.sqrt(
+        (mse_patch * valid_patch).sum() / valid_patch.sum().clamp(min=1.0)
+    )
+    return rmse_mask, rmse_all
+
 def _rmse_meters_visible_median_bias_from_pred(
     model, samples, pred, mask, valid_mask=None, meta=None,
     norm_scale_m: float = 1.0, prediction_mask=None,
@@ -270,12 +328,14 @@ def train_one_epoch(
         print('log_dir:', log_writer.log_dir)
 
     for data_iter_step, batch in enumerate(metric_logger.log_every(data_loader, print_freq, header)):
-        samples, meta, _, lcc_mask, valid_mask = _unwrap_batch(batch)
+        samples, meta, _, lcc_mask, valid_mask, loss_pixel_mask = _unwrap_batch(batch)
         samples = samples.to(device, non_blocking=True)
         if lcc_mask is not None:
             lcc_mask = lcc_mask.to(device, non_blocking=True)
         if valid_mask is not None:
             valid_mask = valid_mask.to(device, non_blocking=True)
+        if loss_pixel_mask is not None:
+            loss_pixel_mask = loss_pixel_mask.to(device, non_blocking=True)
 
         # per-iteration lr schedule
         if data_iter_step % accum_iter == 0:
@@ -284,7 +344,8 @@ def train_one_epoch(
         # NOTE: FutureWarning about autocast API is harmless; we keep compatibility.
         with torch.cuda.amp.autocast(enabled=getattr(args, "amp", True)):
             loss, pred, mask, prediction_mask = _model_forward(
-                model, samples, args, lcc_mask=lcc_mask, valid_mask=valid_mask
+                model, samples, args, lcc_mask=lcc_mask, valid_mask=valid_mask,
+                loss_pixel_mask=loss_pixel_mask
             )
 
         loss_value = loss.item()
@@ -311,11 +372,18 @@ def train_one_epoch(
         metric_logger.update(lr=lr)
 
         if args is not None and getattr(args, "log_rmse", False):
-            rmse_mask_m, rmse_all_m = _rmse_meters_from_pred(
-                model, samples, pred, mask, valid_mask=valid_mask,
-                meta=meta,
-                norm_scale_m=getattr(args, "norm_scale_m", 1.0)
-            )
+            if loss_pixel_mask is not None:
+                rmse_mask_m, rmse_all_m = _rmse_meters_from_pred_pixel_mask(
+                    model, samples, pred, loss_pixel_mask,
+                    valid_mask=valid_mask, meta=meta,
+                    norm_scale_m=getattr(args, "norm_scale_m", 1.0)
+                )
+            else:
+                rmse_mask_m, rmse_all_m = _rmse_meters_from_pred(
+                    model, samples, pred, mask, valid_mask=valid_mask,
+                    meta=meta,
+                    norm_scale_m=getattr(args, "norm_scale_m", 1.0)
+                )
             
             metric_logger.update(rmse_m_mask=float(rmse_mask_m.item()))
             metric_logger.update(rmse_m_all=float(rmse_all_m.item()))
@@ -370,42 +438,53 @@ def evaluate_one_epoch(
     print_freq = 50
 
     for data_iter_step, batch in enumerate(metric_logger.log_every(data_loader, print_freq, header)):
-        samples, meta, _, lcc_mask, valid_mask = _unwrap_batch(batch)
+        samples, meta, _, lcc_mask, valid_mask, loss_pixel_mask = _unwrap_batch(batch)
         samples = samples.to(device, non_blocking=True)
         if lcc_mask is not None:
             lcc_mask = lcc_mask.to(device, non_blocking=True)
         if valid_mask is not None:
             valid_mask = valid_mask.to(device, non_blocking=True)
+        if loss_pixel_mask is not None:
+            loss_pixel_mask = loss_pixel_mask.to(device, non_blocking=True)
         
         with torch.cuda.amp.autocast(enabled=getattr(args, "amp", True)):
             loss, pred, mask, prediction_mask = _model_forward(
-                model, samples, args, lcc_mask=lcc_mask, valid_mask=valid_mask
+                model, samples, args, lcc_mask=lcc_mask, valid_mask=valid_mask,
+                loss_pixel_mask=loss_pixel_mask
             )
 
         loss_value = loss.item()
         metric_logger.update(loss=loss_value)
 
         if args is not None and getattr(args, "log_rmse", False):
-            rmse_mask_m, rmse_all_m = _rmse_meters_from_pred(
-                model, samples, pred, mask, valid_mask=valid_mask,
-                meta=meta,
-                norm_scale_m=getattr(args, "norm_scale_m", 1.0)
-            )
+            if loss_pixel_mask is not None:
+                rmse_mask_m, rmse_all_m = _rmse_meters_from_pred_pixel_mask(
+                    model, samples, pred, loss_pixel_mask,
+                    valid_mask=valid_mask, meta=meta,
+                    norm_scale_m=getattr(args, "norm_scale_m", 1.0)
+                )
+            else:
+                rmse_mask_m, rmse_all_m = _rmse_meters_from_pred(
+                    model, samples, pred, mask, valid_mask=valid_mask,
+                    meta=meta,
+                    norm_scale_m=getattr(args, "norm_scale_m", 1.0)
+                )
             
             metric_logger.update(rmse_m_mask=float(rmse_mask_m.item()))
             metric_logger.update(rmse_m_all=float(rmse_all_m.item()))
             
-            # New: visible-median bias correction (deployment-style)
-            rmse_mask_vis_m, rmse_all_vis_m, bias_vis_m = _rmse_meters_visible_median_bias_from_pred(
-                model, samples, pred, mask, valid_mask=valid_mask,
-                meta=meta,
-                norm_scale_m=getattr(args, "norm_scale_m", 1.0),
-                prediction_mask=prediction_mask,
-            )
-            
-            metric_logger.update(rmse_m_mask_viscorr=float(rmse_mask_vis_m.item()))
-            metric_logger.update(rmse_m_all_viscorr=float(rmse_all_vis_m.item()))
-            metric_logger.update(bias_m_vis_med=float(bias_vis_m.item()))
+            # Visible-median bias correction remains patch-level. For v2
+            # pixel-loss training, the primary metric is rmse_m_mask above.
+            if loss_pixel_mask is None:
+                rmse_mask_vis_m, rmse_all_vis_m, bias_vis_m = _rmse_meters_visible_median_bias_from_pred(
+                    model, samples, pred, mask, valid_mask=valid_mask,
+                    meta=meta,
+                    norm_scale_m=getattr(args, "norm_scale_m", 1.0),
+                    prediction_mask=prediction_mask,
+                )
+                metric_logger.update(rmse_m_mask_viscorr=float(rmse_mask_vis_m.item()))
+                metric_logger.update(rmse_m_all_viscorr=float(rmse_all_vis_m.item()))
+                metric_logger.update(bias_m_vis_med=float(bias_vis_m.item()))
 
             if lcc_mask is not None:
                 if valid_mask is not None:

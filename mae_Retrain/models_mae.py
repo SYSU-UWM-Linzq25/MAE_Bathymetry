@@ -410,13 +410,19 @@ class MaskedAutoencoderViT(nn.Module):
         return x
     def forward_loss(
         self, imgs, pred, loss_mask, lcc_patch=None, valid_patch=None,
-        loss_on_lcc_only=False,
+        loss_on_lcc_only=False, loss_pixel_mask=None,
     ):
-        """MSE only on usable prediction patches.
+        """MSE on selected patches or selected pixels.
 
-        ``loss_mask`` is either all usable river prediction patches or only
-        their centered core subset, depending on ``loss_region_mode``. A patch
-        with any NoData pixel has valid_patch=0 and cannot contribute.
+        Backward compatible behavior:
+          * if loss_pixel_mask is None, compute patch-mean MSE and weight by
+            patch-level loss_mask exactly as before.
+
+        MAE v2 dual-mask behavior:
+          * if loss_pixel_mask is provided, patchify it to [N,L,P] and compute
+            pixel-weighted MSE. This lets the encoder hide full water patches
+            while the loss is computed only on the final pixel-level bathy
+            target mask.
         """
         target = self.patchify(imgs)
         if self.norm_pix_loss:
@@ -424,8 +430,30 @@ class MaskedAutoencoderViT(nn.Module):
             var = target.var(dim=-1, keepdim=True)
             target = (target - mean) / (var + 1.e-6)**.5
 
-        loss = (pred - target) ** 2
-        loss = loss.mean(dim=-1)  # [N,L]
+        err2 = (pred - target) ** 2
+
+        # New pixel-level loss path.
+        if loss_pixel_mask is not None:
+            pixel_w = self.patchify(loss_pixel_mask.float())  # [N,L,p*p*C]
+            pixel_w = (pixel_w > 0.5).float()
+
+            # Restrict to decoder/prediction patches selected by the hidden mask.
+            if loss_mask is not None:
+                pixel_w = pixel_w * loss_mask.float().unsqueeze(-1)
+            if valid_patch is not None:
+                pixel_w = pixel_w * valid_patch.float().unsqueeze(-1)
+            if loss_on_lcc_only and lcc_patch is not None:
+                pixel_w = pixel_w * lcc_patch.float().unsqueeze(-1)
+
+            denom = pixel_w.sum()
+            if denom > 0:
+                return (err2 * pixel_w).sum() / denom
+
+            # Defensive differentiable zero.
+            return err2.mean() * 0.0
+
+        # Original patch-level loss path.
+        loss = err2.mean(dim=-1)  # [N,L]
 
         weight = loss_mask.float()
         if valid_patch is not None:
@@ -451,7 +479,7 @@ class MaskedAutoencoderViT(nn.Module):
         return torch.cat([cls, tok], dim=1)
 
     def forward(self, imgs, mask_ratio=0.75, file_name="", lcc_mask=None,
-                valid_mask=None, loss_on_lcc_only=False, lcc_priority=10.0,
+                valid_mask=None, loss_pixel_mask=None, loss_on_lcc_only=False, lcc_priority=10.0,
                 lcc_mask_mode="none", lcc_patch_threshold=0.5,
                 loss_region_mode="all", core_patch_radius=3,
                 return_aux_masks=False):
@@ -499,6 +527,7 @@ class MaskedAutoencoderViT(nn.Module):
             lcc_patch=lcc_patch,
             valid_patch=valid_patch,
             loss_on_lcc_only=loss_on_lcc_only,
+            loss_pixel_mask=loss_pixel_mask,
         )
         if return_aux_masks:
             return loss, pred, loss_mask, prediction_mask

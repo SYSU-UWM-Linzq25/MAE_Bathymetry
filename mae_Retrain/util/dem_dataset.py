@@ -1040,3 +1040,473 @@ class DEMLCCPairDataset(Dataset):
         if self.return_meta:
             return x, meta, lcc_t, valid_t
         return x, lcc_t, valid_t
+
+
+# --------------------------------------------------------
+# Paired DEM + Hidden-mask + Pixel-loss-mask dataset for MAE v2
+# --------------------------------------------------------
+
+def _center_or_pad_quad(
+    arr: np.ndarray,
+    hidden: np.ndarray,
+    loss_mask: np.ndarray,
+    valid: np.ndarray,
+    input_size: int,
+    random_crop: bool,
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Apply the same crop/pad to DEM, hidden mask, loss mask, and valid mask."""
+    h, w = arr.shape
+    s = int(input_size)
+    if h == s and w == s:
+        return arr, hidden, loss_mask, valid
+
+    if h >= s and w >= s:
+        if random_crop:
+            top = np.random.randint(0, h - s + 1)
+            left = np.random.randint(0, w - s + 1)
+        else:
+            top = (h - s) // 2
+            left = (w - s) // 2
+        sl = np.s_[top:top + s, left:left + s]
+        return arr[sl], hidden[sl], loss_mask[sl], valid[sl]
+
+    out_arr = np.full((s, s), np.nan, dtype=np.float32)
+    out_hidden = np.zeros((s, s), dtype=np.uint8)
+    out_loss = np.zeros((s, s), dtype=np.uint8)
+    out_valid = np.zeros((s, s), dtype=np.uint8)
+    hh = min(h, s)
+    ww = min(w, s)
+    out_arr[:hh, :ww] = arr[:hh, :ww]
+    out_hidden[:hh, :ww] = hidden[:hh, :ww]
+    out_loss[:hh, :ww] = loss_mask[:hh, :ww]
+    out_valid[:hh, :ww] = valid[:hh, :ww]
+    return out_arr, out_hidden, out_loss, out_valid
+
+
+class DEMDualMaskDataset(Dataset):
+    """Paired single-band DEM tile + Hidden mask + pixel-level Loss mask.
+
+    This is the MAE v2 downstream dataset.
+
+    Returns by default:
+        x:              FloatTensor [1,H,W], normalized merged DEM tile
+        meta:           dict
+        hidden_mask:    FloatTensor [1,H,W], 1=patch/pixel region hidden from encoder
+        valid_mask:     FloatTensor [1,H,W], 1=DEM valid, 0=NoData/invalid
+        loss_mask_pixel:FloatTensor [1,H,W], 1=pixel participates in loss
+
+    If return_path=True:
+        returns (x, meta, path, hidden_mask, valid_mask, loss_mask_pixel)
+
+    Notes:
+      * hidden_mask may already be patch-expanded 336x336 from D001.
+        The model still max-pools it to 21x21 patch tokens.
+      * loss_mask_pixel remains pixel-level and is patchified inside models_mae.py
+        for weighted pixel MSE.
+      * tile_norm_visible_only uses hidden_mask==0 and valid==1 pixels only.
+    """
+
+    def __init__(
+        self,
+        dem_dir: Optional[str] = None,
+        hidden_dir: Optional[str] = None,
+        loss_dir: Optional[str] = None,
+        dem_list_path: Optional[str] = None,
+        hidden_list_path: Optional[str] = None,
+        loss_list_path: Optional[str] = None,
+        input_size: int = 336,
+        nodata: Optional[float] = None,
+        nodata_threshold: Optional[float] = -9999.0,
+        random_flip: bool = False,
+        return_path: bool = False,
+        tile_norm: bool = False,
+        tile_norm_eps: float = 1e-3,
+        tile_norm_std_scale: float = 1.0,
+        return_meta: bool = True,
+        tile_norm_visible_only: bool = False,
+        min_valid_visible_patch_ratio: float = 0.0,
+        min_loss_pixel_count: int = 1,
+        min_loss_pixel_ratio: float = 0.0,
+        min_core_loss_pixel_count: int = 0,
+        min_core_loss_pixel_ratio: float = 0.0,
+        core_patch_radius: int = 3,
+        patch_size: int = 16,
+        hidden_patch_threshold: float = 0.5,
+    ):
+        if (not dem_dir) and (not dem_list_path):
+            raise ValueError('DEMDualMaskDataset: dem_dir or dem_list_path must be provided')
+        if (not hidden_dir) and (not hidden_list_path):
+            raise ValueError('DEMDualMaskDataset: hidden_dir or hidden_list_path must be provided')
+        if (not loss_dir) and (not loss_list_path):
+            raise ValueError('DEMDualMaskDataset: loss_dir or loss_list_path must be provided')
+
+        self.dem_dir = str(dem_dir) if dem_dir else ''
+        self.hidden_dir = str(hidden_dir) if hidden_dir else ''
+        self.loss_dir = str(loss_dir) if loss_dir else ''
+        self.input_size = int(input_size)
+        self.nodata = nodata
+        self.nodata_threshold = nodata_threshold
+        self.random_flip = bool(random_flip)
+        self.return_path = bool(return_path)
+        self.tile_norm = bool(tile_norm)
+        self.tile_norm_eps = float(tile_norm_eps)
+        self.tile_norm_std_scale = float(tile_norm_std_scale)
+        if self.tile_norm_std_scale <= 0:
+            raise ValueError(f"tile_norm_std_scale must be > 0, got {self.tile_norm_std_scale}")
+        self.return_meta = bool(return_meta)
+        self.tile_norm_visible_only = bool(tile_norm_visible_only)
+        self.patch_size = int(patch_size)
+        self.hidden_patch_threshold = float(hidden_patch_threshold)
+        self.min_valid_visible_patch_ratio = float(min_valid_visible_patch_ratio)
+        self.min_loss_pixel_count = int(min_loss_pixel_count)
+        self.min_loss_pixel_ratio = float(min_loss_pixel_ratio)
+        self.min_core_loss_pixel_count = int(min_core_loss_pixel_count)
+        self.min_core_loss_pixel_ratio = float(min_core_loss_pixel_ratio)
+        self.core_patch_radius = int(core_patch_radius)
+
+        if dem_list_path:
+            dem_files = _read_list_file(dem_list_path, base_dir=self.dem_dir if self.dem_dir else None)
+        else:
+            dem_files = _collect_tiff_files(self.dem_dir)
+        if hidden_list_path:
+            hidden_files = _read_list_file(hidden_list_path, base_dir=self.hidden_dir if self.hidden_dir else None)
+        else:
+            hidden_files = _collect_tiff_files(self.hidden_dir)
+        if loss_list_path:
+            loss_files = _read_list_file(loss_list_path, base_dir=self.loss_dir if self.loss_dir else None)
+        else:
+            loss_files = _collect_tiff_files(self.loss_dir)
+
+        if len(dem_files) == 0:
+            raise ValueError('No DEM/train GeoTIFF files found.')
+        if len(hidden_files) == 0:
+            raise ValueError('No hidden-mask GeoTIFF files found.')
+        if len(loss_files) == 0:
+            raise ValueError('No pixel-loss-mask GeoTIFF files found.')
+
+        if dem_list_path and hidden_list_path and loss_list_path:
+            if not (len(dem_files) == len(hidden_files) == len(loss_files)):
+                raise ValueError(
+                    'DEM/hidden/loss list length mismatch: '
+                    f'{len(dem_files)} vs {len(hidden_files)} vs {len(loss_files)}'
+                )
+            pairs = list(zip(dem_files, hidden_files, loss_files))
+        else:
+            hidden_map: Dict[str, str] = {}
+            for hp in hidden_files:
+                k = _key_from_lcc_pair_name(hp)
+                if k in hidden_map:
+                    raise ValueError(f'Duplicate hidden-mask key={k}: {hidden_map[k]} and {hp}')
+                hidden_map[k] = hp
+            loss_map: Dict[str, str] = {}
+            for lp in loss_files:
+                k = _key_from_lcc_pair_name(lp)
+                if k in loss_map:
+                    raise ValueError(f'Duplicate loss-mask key={k}: {loss_map[k]} and {lp}')
+                loss_map[k] = lp
+
+            pairs = []
+            missing = []
+            for dp in dem_files:
+                k = _key_from_lcc_pair_name(dp)
+                hp = hidden_map.get(k)
+                lp = loss_map.get(k)
+                if hp is None or lp is None:
+                    missing.append((Path(dp).name, hp is None, lp is None))
+                else:
+                    pairs.append((dp, hp, lp))
+            if len(pairs) == 0:
+                raise RuntimeError(
+                    'No matched DEM/hidden/loss triples found. '
+                    f'DEM={dem_dir or dem_list_path}; hidden={hidden_dir or hidden_list_path}; loss={loss_dir or loss_list_path}'
+                )
+            if missing:
+                preview = ', '.join(
+                    f'{n}(hidden_missing={hm},loss_missing={lm})'
+                    for n, hm, lm in missing[:10]
+                )
+                print(
+                    f'[DEMDualMaskDataset][WARN] missing hidden/loss for {len(missing)} DEM tiles; '
+                    f'first examples: {preview}'
+                )
+
+        # Patch-quality filter. D001 already filtered, but this is a safety net.
+        kept = []
+        dropped = 0
+        drop_reasons = {
+            'read_error': 0,
+            'visible_ratio': 0,
+            'loss_pixel_count': 0,
+            'loss_pixel_ratio': 0,
+            'core_loss_pixel_count': 0,
+            'core_loss_pixel_ratio': 0,
+        }
+        examples: List[str] = []
+        for dp, hp, lp in pairs:
+            reason = None
+            try:
+                raw = _read_dem_tiff(dp)
+                valid = _valid_mask_from_values(raw, self.nodata, self.nodata_threshold).astype(np.uint8, copy=False)
+                hidden = _read_lcc_mask_tiff(hp)
+                loss = _read_lcc_mask_tiff(lp)
+
+                if raw.shape != hidden.shape or raw.shape != loss.shape:
+                    raise ValueError(
+                        f'shape mismatch raw={raw.shape}, hidden={hidden.shape}, loss={loss.shape}'
+                    )
+
+                status = _patch_status_from_masks(
+                    hidden, valid, patch_size=self.patch_size,
+                    threshold=self.hidden_patch_threshold,
+                )
+                n_total = max(1, int(status["valid"].size))
+                visible_ratio = float(status["visible"].sum() / n_total)
+                if visible_ratio < self.min_valid_visible_patch_ratio:
+                    reason = 'visible_ratio'
+
+                loss_count = int(loss.sum())
+                loss_ratio = float(loss_count / max(1, loss.size))
+                if reason is None and loss_count < self.min_loss_pixel_count:
+                    reason = 'loss_pixel_count'
+                if reason is None and loss_ratio < self.min_loss_pixel_ratio:
+                    reason = 'loss_pixel_ratio'
+
+                if reason is None and (self.min_core_loss_pixel_count > 0 or self.min_core_loss_pixel_ratio > 0):
+                    core_patch = _center_core_patch_mask(
+                        status["valid"].shape, radius=self.core_patch_radius
+                    )
+                    p = self.patch_size
+                    core_px = np.kron(core_patch.astype(np.uint8), np.ones((p, p), dtype=np.uint8)).astype(bool)
+                    core_px = core_px[:loss.shape[0], :loss.shape[1]]
+                    core_loss_count = int((loss.astype(bool) & core_px).sum())
+                    core_total = max(1, int(core_px.sum()))
+                    core_ratio = float(core_loss_count / core_total)
+                    if core_loss_count < self.min_core_loss_pixel_count:
+                        reason = 'core_loss_pixel_count'
+                    elif core_ratio < self.min_core_loss_pixel_ratio:
+                        reason = 'core_loss_pixel_ratio'
+
+            except Exception as e:
+                reason = 'read_error'
+                if len(examples) < 20:
+                    examples.append(f'{Path(dp).name}: reason=read_error, error={repr(e)}')
+
+            if reason is None:
+                kept.append((dp, hp, lp))
+            else:
+                dropped += 1
+                drop_reasons[reason] += 1
+                if len(examples) < 20 and reason != 'read_error':
+                    examples.append(
+                        f'{Path(dp).name}: reason={reason}, '
+                        f'visible_ratio={locals().get("visible_ratio", float("nan")):.6f}, '
+                        f'loss_count={locals().get("loss_count", -1)}, '
+                        f'loss_ratio={locals().get("loss_ratio", float("nan")):.6f}'
+                    )
+
+        if dropped:
+            print(
+                '[DEMDualMaskDataset] patch-quality filter: '
+                f'kept={len(kept)} dropped={dropped} '
+                f'min_valid_visible_patch_ratio={self.min_valid_visible_patch_ratio} '
+                f'min_loss_pixel_count={self.min_loss_pixel_count} '
+                f'min_loss_pixel_ratio={self.min_loss_pixel_ratio} '
+                f'drop_reasons={drop_reasons}'
+            )
+            if examples:
+                print('[DEMDualMaskDataset] dropped examples:')
+                for e in examples:
+                    print('  ' + e)
+
+        if len(kept) == 0:
+            raise RuntimeError('All DEM/hidden/loss triples were removed by filtering.')
+
+        self.triples: List[Tuple[str, str, str]] = [(str(a), str(b), str(c)) for a, b, c in kept]
+        self.files: List[str] = [a for a, _, _ in self.triples]
+        self.hidden_files: List[str] = [b for _, b, _ in self.triples]
+        self.loss_files: List[str] = [c for _, _, c in self.triples]
+
+        self.norm_method = 'none'
+        self.norm_a = 0.0
+        self.norm_b = 1.0
+
+        print(f'[DEMDualMaskDataset] matched triples: {len(self.triples)}')
+
+    def __len__(self) -> int:
+        return len(self.triples)
+
+    def set_norm(self, a: float, b: float, method: str = 'meanstd') -> None:
+        method = method.lower()
+        if method not in ('meanstd', 'minmax'):
+            raise ValueError(f'Unknown norm method: {method}')
+        self.norm_method = method
+        self.norm_a = float(a)
+        self.norm_b = float(b)
+
+    def _normalize(self, arr: np.ndarray) -> np.ndarray:
+        if self.norm_method == 'none':
+            return arr
+        if self.norm_method == 'meanstd':
+            std = self.norm_b if self.norm_b != 0 else 1.0
+            return (arr - self.norm_a) / std
+        denom = (self.norm_b - self.norm_a) if (self.norm_b - self.norm_a) != 0 else 1.0
+        return (arr - self.norm_a) / denom
+
+    def _normalize_tile_instance(
+        self,
+        arr: np.ndarray,
+        hidden_mask: Optional[np.ndarray] = None,
+        valid_mask: Optional[np.ndarray] = None,
+    ):
+        valid = np.isfinite(arr)
+        if valid_mask is not None:
+            valid &= valid_mask.astype(bool)
+
+        if self.tile_norm_visible_only and hidden_mask is not None:
+            known = (hidden_mask == 0) & valid
+            vals = arr[known]
+            if vals.size < 2:
+                vals = arr[valid]
+        else:
+            vals = arr[valid]
+
+        if vals.size < 2:
+            raise ValueError('Tile has fewer than two valid values after NoData removal.')
+
+        tile_mean_m = float(np.mean(vals))
+        tile_std_m = float(np.std(vals))
+        tile_std_scaled = tile_std_m * self.tile_norm_std_scale
+        tile_std_safe = max(tile_std_scaled, self.tile_norm_eps)
+
+        arr_tile = (arr - tile_mean_m) / tile_std_safe
+        arr_tile = np.where(valid, arr_tile, 0.0)
+
+        return arr_tile.astype(np.float32, copy=False), tile_mean_m, tile_std_m, tile_std_safe
+
+    def __getitem__(self, idx: int):
+        dem_path, hidden_path, loss_path = self.triples[idx]
+        raw = _read_dem_tiff(dem_path)
+        valid = _valid_mask_from_values(
+            raw, self.nodata, self.nodata_threshold
+        ).astype(np.uint8, copy=False)
+        arr = np.where(valid > 0, raw, np.nan).astype(np.float32, copy=False)
+        hidden = _read_lcc_mask_tiff(hidden_path)
+        loss_mask = _read_lcc_mask_tiff(loss_path)
+
+        if arr.shape != hidden.shape or arr.shape != loss_mask.shape:
+            raise ValueError(
+                f'Shape mismatch: DEM {Path(dem_path).name} {arr.shape}; '
+                f'hidden {Path(hidden_path).name} {hidden.shape}; '
+                f'loss {Path(loss_path).name} {loss_mask.shape}'
+            )
+
+        arr, hidden, loss_mask, valid = _center_or_pad_quad(
+            arr, hidden, loss_mask, valid, self.input_size, random_crop=self.random_flip
+        )
+
+        if self.random_flip:
+            flip_x = np.random.rand() < 0.5
+            flip_y = np.random.rand() < 0.5
+            if flip_x:
+                arr = np.flip(arr, axis=1)
+                hidden = np.flip(hidden, axis=1)
+                loss_mask = np.flip(loss_mask, axis=1)
+                valid = np.flip(valid, axis=1)
+            if flip_y:
+                arr = np.flip(arr, axis=0)
+                hidden = np.flip(hidden, axis=0)
+                loss_mask = np.flip(loss_mask, axis=0)
+                valid = np.flip(valid, axis=0)
+
+        arr_m = np.ascontiguousarray(arr).astype(np.float32, copy=False)
+        hidden = np.ascontiguousarray(hidden).astype(np.uint8, copy=False)
+        loss_mask = np.ascontiguousarray(loss_mask).astype(np.uint8, copy=False)
+        valid = np.ascontiguousarray(valid).astype(np.uint8, copy=False)
+
+        # Safety: pixel-level loss can only occur where DEM is valid.
+        loss_mask = (loss_mask.astype(bool) & valid.astype(bool)).astype(np.uint8, copy=False)
+
+        if self.tile_norm:
+            arr_model, tile_mean_m, tile_std_m, tile_std_safe = (
+                self._normalize_tile_instance(
+                    arr_m, hidden_mask=hidden, valid_mask=valid
+                )
+            )
+        else:
+            valid_bool = valid.astype(bool)
+            arr_model = self._normalize(arr_m).astype(np.float32, copy=False)
+            arr_model = np.where(valid_bool, arr_model, 0.0).astype(np.float32, copy=False)
+            vals = arr_m[valid_bool]
+            if vals.size < 2:
+                raise ValueError(f'{Path(dem_path).name} has fewer than two valid pixels.')
+            tile_mean_m = float(np.mean(vals))
+            tile_std_m = float(np.std(vals))
+            tile_std_scaled = tile_std_m * self.tile_norm_std_scale
+            tile_std_safe = max(tile_std_scaled, self.tile_norm_eps)
+
+        status = _patch_status_from_masks(
+            hidden, valid, patch_size=self.patch_size,
+            threshold=self.hidden_patch_threshold,
+        )
+        n_total = max(1, int(status["valid"].size))
+        hidden_pixel_ratio = float(hidden.mean())
+        final_loss_pixel_ratio = float(loss_mask.mean())
+        hidden_patch_ratio = float(status["candidate"].sum() / n_total)
+        prediction_patch_ratio = float(status["prediction"].sum() / n_total)
+        visible_valid_patch_ratio = float(status["visible"].sum() / n_total)
+        ignored_patch_ratio = float(status["ignored"].sum() / n_total)
+
+        # Center-core diagnostics only; loss remains pixel-level.
+        core_patch = _center_core_patch_mask(status["valid"].shape, radius=self.core_patch_radius)
+        p = self.patch_size
+        core_px = np.kron(core_patch.astype(np.uint8), np.ones((p, p), dtype=np.uint8)).astype(bool)
+        core_px = core_px[:loss_mask.shape[0], :loss_mask.shape[1]]
+        core_loss_pixel_count = int((loss_mask.astype(bool) & core_px).sum())
+        core_loss_pixel_ratio = float(core_loss_pixel_count / max(1, int(core_px.sum())))
+
+        x = torch.from_numpy(np.ascontiguousarray(arr_model)).unsqueeze(0)
+        hidden_t = torch.from_numpy(hidden.astype(np.float32, copy=False)).unsqueeze(0)
+        valid_t = torch.from_numpy(valid.astype(np.float32, copy=False)).unsqueeze(0)
+        loss_t = torch.from_numpy(loss_mask.astype(np.float32, copy=False)).unsqueeze(0)
+
+        meta = {
+            "path": dem_path,
+            "hidden_path": hidden_path,
+            "loss_path": loss_path,
+            "tile_mean_m": tile_mean_m,
+            "tile_std_m": tile_std_m,
+            "tile_std_safe": tile_std_safe,
+            "tile_norm_std_scale": float(self.tile_norm_std_scale),
+            "tile_norm": bool(self.tile_norm),
+            "tile_norm_visible_only": bool(self.tile_norm_visible_only),
+            "global_norm_method": self.norm_method,
+            "global_norm_a": float(self.norm_a),
+            "global_norm_b": float(self.norm_b),
+            "nodata_value": float(self.nodata) if self.nodata is not None else float('nan'),
+            "nodata_threshold": (
+                float(self.nodata_threshold)
+                if self.nodata_threshold is not None else float('nan')
+            ),
+            "valid_pixel_ratio": float(valid.mean()),
+            "hidden_pixel_ratio": hidden_pixel_ratio,
+            "final_loss_pixel_ratio": final_loss_pixel_ratio,
+            "hidden_patch_ratio": hidden_patch_ratio,
+            # compatibility with older logs
+            "lcc_pixel_ratio": hidden_pixel_ratio,
+            "lcc_patch_ratio": prediction_patch_ratio,
+            "candidate_lcc_patch_ratio": hidden_patch_ratio,
+            "prediction_patch_ratio": prediction_patch_ratio,
+            "visible_valid_patch_ratio": visible_valid_patch_ratio,
+            "ignored_patch_ratio": ignored_patch_ratio,
+            "loss_mask_pixel_count": int(loss_mask.sum()),
+            "loss_mask_pixel_ratio": final_loss_pixel_ratio,
+            "core_patch_radius": int(self.core_patch_radius),
+            "core_loss_pixel_count": core_loss_pixel_count,
+            "core_loss_pixel_ratio": core_loss_pixel_ratio,
+        }
+
+        if self.return_path:
+            return x, meta, dem_path, hidden_t, valid_t, loss_t
+        if self.return_meta:
+            return x, meta, hidden_t, valid_t, loss_t
+        return x, hidden_t, valid_t, loss_t
