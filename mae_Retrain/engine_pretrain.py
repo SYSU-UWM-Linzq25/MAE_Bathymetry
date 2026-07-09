@@ -204,13 +204,25 @@ def _rmse_meters_from_pred(
 @torch.no_grad()
 def _rmse_meters_from_pred_pixel_mask(
     model, samples, pred, loss_pixel_mask, valid_mask=None, meta=None,
-    norm_scale_m: float = 1.0,
+    norm_scale_m: float = 1.0, patch_loss_mask=None,
 ):
-    """RMSE in meters only on pixel-level loss_mask pixels."""
+    """RMSE in meters on the same pixel-level region used by v2 loss.
+
+    Important for MAE v2:
+      * loss_pixel_mask is the exact pixel-level supervision mask.
+      * patch_loss_mask is the patch-level loss region returned by model.forward.
+        In core-loss mode it is prediction_patch AND core_patch.
+      * Therefore rmse_m_mask must use:
+            loss_pixel_mask AND patch_loss_mask AND valid_patch
+        so early stopping and logs match the actual optimized loss region.
+    """
     target = model.patchify(samples)
     err = pred.float() - target.float()
     pix_w = model.patchify(loss_pixel_mask.float())
     pix_w = (pix_w > 0.5).float()
+
+    if patch_loss_mask is not None:
+        pix_w = pix_w * patch_loss_mask.float().unsqueeze(-1)
 
     if valid_mask is not None:
         valid_patch = model._valid_patch_from_mask(valid_mask).float()
@@ -376,7 +388,8 @@ def train_one_epoch(
                 rmse_mask_m, rmse_all_m = _rmse_meters_from_pred_pixel_mask(
                     model, samples, pred, loss_pixel_mask,
                     valid_mask=valid_mask, meta=meta,
-                    norm_scale_m=getattr(args, "norm_scale_m", 1.0)
+                    norm_scale_m=getattr(args, "norm_scale_m", 1.0),
+                    patch_loss_mask=mask,
                 )
             else:
                 rmse_mask_m, rmse_all_m = _rmse_meters_from_pred(
@@ -461,7 +474,8 @@ def evaluate_one_epoch(
                 rmse_mask_m, rmse_all_m = _rmse_meters_from_pred_pixel_mask(
                     model, samples, pred, loss_pixel_mask,
                     valid_mask=valid_mask, meta=meta,
-                    norm_scale_m=getattr(args, "norm_scale_m", 1.0)
+                    norm_scale_m=getattr(args, "norm_scale_m", 1.0),
+                    patch_loss_mask=mask,
                 )
             else:
                 rmse_mask_m, rmse_all_m = _rmse_meters_from_pred(

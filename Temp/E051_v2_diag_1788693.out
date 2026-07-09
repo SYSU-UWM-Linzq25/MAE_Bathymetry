@@ -1,0 +1,248 @@
+=== E051 MAE v2 train/val core pixel diagnosis ===
+Wed Jul  8 10:17:12 CDT 2026
+HOST=execute-4006.mortimer.hpc.uwm.edu
+RUN_DIR=/tank/data/SFS/xinyis/data/bathymetry/MAE-Topography/Downstream_Task_Bathy/cross_validation_v2/runs/holdout_CO_UpperColorado_Topobathy_1_2020/train_holdout_CO_UpperColorado_Topobathy_1_2020_v2_dualmask_corePixelLoss_e400_b4_acc4
+CKPT=/tank/data/SFS/xinyis/data/bathymetry/MAE-Topography/Downstream_Task_Bathy/cross_validation_v2/runs/holdout_CO_UpperColorado_Topobathy_1_2020/train_holdout_CO_UpperColorado_Topobathy_1_2020_v2_dualmask_corePixelLoss_e400_b4_acc4/checkpoint-best.pth
+SPLIT_DIR=/tank/data/SFS/xinyis/data/bathymetry/MAE-Topography/Downstream_Task_Bathy/cross_validation_v2/splits/holdout_CO_UpperColorado_Topobathy_1_2020
+OUT_ROOT=/tank/data/SFS/xinyis/data/bathymetry/MAE-Topography/Downstream_Task_Bathy/cross_validation_v2/runs/holdout_CO_UpperColorado_Topobathy_1_2020/train_holdout_CO_UpperColorado_Topobathy_1_2020_v2_dualmask_corePixelLoss_e400_b4_acc4/eval_E050_v2_dualmask_core_pixel_diagnosis
+SCRIPT=/tank/data/SFS/xinyis/data/bathymetry/MAE-Topography/Downstream_Task_Bathy/script/E050_v2_dualmask_evaluate_core_pixel_metrics_20260707_diagfix.py
+TILE_ROOT=/tank/data/SFS/xinyis/data/bathymetry/Processed_Results/Tiles_for_MAE_v2/Tiles_1m
+GPU_ID=0
+CUDA_VISIBLE_DEVICES=0
+Wed Jul  8 10:17:12 2026       
++-----------------------------------------------------------------------------------------+
+| NVIDIA-SMI 595.45.04              Driver Version: 595.45.04      CUDA Version: 13.2     |
++-----------------------------------------+------------------------+----------------------+
+| GPU  Name                 Persistence-M | Bus-Id          Disp.A | Volatile Uncorr. ECC |
+| Fan  Temp   Perf          Pwr:Usage/Cap |           Memory-Usage | GPU-Util  Compute M. |
+|                                         |                        |               MIG M. |
+|=========================================+========================+======================|
+|   0  NVIDIA L40S                    Off |   00000000:2A:00.0 Off |                    0 |
+| N/A   32C    P8             32W /  350W |       0MiB /  46068MiB |      0%      Default |
+|                                         |                        |                  N/A |
++-----------------------------------------+------------------------+----------------------+
+
++-----------------------------------------------------------------------------------------+
+| Processes:                                                                              |
+|  GPU   GI   CI              PID   Type   Process name                        GPU Memory |
+|        ID   ID                                                               Usage      |
+|=========================================================================================|
+|  No running processes found                                                             |
++-----------------------------------------------------------------------------------------+
+
+=== Evaluate split=train ===
+[DEMDualMaskDataset] matched triples: 4016
+[CKPT] loaded: /tank/data/SFS/xinyis/data/bathymetry/MAE-Topography/Downstream_Task_Bathy/cross_validation_v2/runs/holdout_CO_UpperColorado_Topobathy_1_2020/train_holdout_CO_UpperColorado_Topobathy_1_2020_v2_dualmask_corePixelLoss_e400_b4_acc4/checkpoint-best.pth
+[CKPT] missing_keys=[]
+[CKPT] unexpected_keys=[]
+[EVAL] batch=0/1004 samples=4 loss_norm_batch=0.0491096
+[EVAL] batch=50/1004 samples=204 loss_norm_batch=0.0023852
+[EVAL] batch=100/1004 samples=404 loss_norm_batch=0.00495371
+[EVAL] batch=150/1004 samples=604 loss_norm_batch=0.000569227
+[EVAL] batch=200/1004 samples=804 loss_norm_batch=0.00193328
+[EVAL] batch=250/1004 samples=1004 loss_norm_batch=0.00123488
+[EVAL] batch=300/1004 samples=1204 loss_norm_batch=0.00136504
+[EVAL] batch=350/1004 samples=1404 loss_norm_batch=0.00322988
+[EVAL] batch=400/1004 samples=1604 loss_norm_batch=0.00539632
+[EVAL] batch=450/1004 samples=1804 loss_norm_batch=0.00400836
+[EVAL] batch=500/1004 samples=2004 loss_norm_batch=0.0133771
+[EVAL] batch=550/1004 samples=2204 loss_norm_batch=0.00852413
+[EVAL] batch=600/1004 samples=2404 loss_norm_batch=0.00820836
+[EVAL] batch=650/1004 samples=2604 loss_norm_batch=0.00924394
+[EVAL] batch=700/1004 samples=2804 loss_norm_batch=0.0725479
+[EVAL] batch=750/1004 samples=3004 loss_norm_batch=0.409777
+[EVAL] batch=800/1004 samples=3204 loss_norm_batch=0.0204419
+[EVAL] batch=850/1004 samples=3404 loss_norm_batch=0.0129914
+[EVAL] batch=900/1004 samples=3604 loss_norm_batch=0.00150812
+[EVAL] batch=950/1004 samples=3804 loss_norm_batch=0.000884056
+[EVAL] batch=1000/1004 samples=4004 loss_norm_batch=0.00259354
+{
+  "split_name": "train",
+  "checkpoint": "/tank/data/SFS/xinyis/data/bathymetry/MAE-Topography/Downstream_Task_Bathy/cross_validation_v2/runs/holdout_CO_UpperColorado_Topobathy_1_2020/train_holdout_CO_UpperColorado_Topobathy_1_2020_v2_dualmask_corePixelLoss_e400_b4_acc4/checkpoint-best.pth",
+  "n_tiles": 4016,
+  "global_pixel_weighted": {
+    "rmse_m_core_loss_pixel": 5.537800699341828,
+    "rmse_norm_core_loss_pixel": 0.13780256397240195,
+    "rmse_m_full_loss_pixel": 7.655343763493266,
+    "rmse_norm_full_loss_pixel": 0.28288968973816037,
+    "rmse_m_prediction_patch_pixel": 8.405285831295577
+  },
+  "per_tile_summary": {
+    "rmse_m_core_loss_pixel": {
+      "count": 4016,
+      "mean": 3.7200249646039545,
+      "median": 1.6272851860594466,
+      "p75": 5.815017873984605,
+      "p90": 10.570635512460708,
+      "p95": 12.619461514094429,
+      "min": 0.06002877546282295,
+      "max": 24.234174997531284
+    },
+    "rmse_norm_core_loss_pixel": {
+      "count": 4016,
+      "mean": 0.09457659481863565,
+      "median": 0.06112890555059304,
+      "p75": 0.09118994091469038,
+      "p90": 0.20399472325968582,
+      "p95": 0.31875394335103413,
+      "min": 0.013665979691176397,
+      "max": 1.2091161618874198
+    },
+    "tile_std_safe": {
+      "count": 4016,
+      "mean": 65.18989283919883,
+      "median": 34.38395690917969,
+      "p75": 109.0444450378418,
+      "p90": 175.35582160949707,
+      "p95": 209.2727222442627,
+      "min": 0.36826884001493454,
+      "max": 465.7597961425781
+    },
+    "norm_to_meter_scale_core": {
+      "count": 4016,
+      "mean": 65.18989282759732,
+      "median": 34.38395688210956,
+      "p75": 109.04444495967425,
+      "p90": 175.3558197689969,
+      "p95": 209.27272794663583,
+      "min": 0.36826884740725807,
+      "max": 465.7597961984005
+    },
+    "n_core_loss_pixels": {
+      "count": 4016,
+      "mean": 4954.440488047809,
+      "median": 5061.5,
+      "p75": 5944.75,
+      "p90": 6858.5,
+      "p95": 7488.25,
+      "min": 279.0,
+      "max": 12165.0
+    }
+  },
+  "notes": [
+    "rmse_m_core_loss_pixel uses Loss_Mask_Pixel AND core/prediction patch mask AND valid patch mask.",
+    "rmse_norm_core_loss_pixel is the square-root of normalized MSE over the same pixels.",
+    "rmse_m_core_loss_pixel \u2248 rmse_norm_core_loss_pixel * tile_std_safe per tile.",
+    "Large train meter RMSE with small normalized loss usually indicates large tile_std_safe in some train rivers/tiles."
+  ]
+}
+[DONE] /tank/data/SFS/xinyis/data/bathymetry/MAE-Topography/Downstream_Task_Bathy/cross_validation_v2/runs/holdout_CO_UpperColorado_Topobathy_1_2020/train_holdout_CO_UpperColorado_Topobathy_1_2020_v2_dualmask_corePixelLoss_e400_b4_acc4/eval_E050_v2_dualmask_core_pixel_diagnosis/train
+
+=== Evaluate split=val ===
+[DEMDualMaskDataset] matched triples: 1151
+[CKPT] loaded: /tank/data/SFS/xinyis/data/bathymetry/MAE-Topography/Downstream_Task_Bathy/cross_validation_v2/runs/holdout_CO_UpperColorado_Topobathy_1_2020/train_holdout_CO_UpperColorado_Topobathy_1_2020_v2_dualmask_corePixelLoss_e400_b4_acc4/checkpoint-best.pth
+[CKPT] missing_keys=[]
+[CKPT] unexpected_keys=[]
+[EVAL] batch=0/288 samples=4 loss_norm_batch=0.0265258
+[EVAL] batch=50/288 samples=204 loss_norm_batch=0.305105
+[EVAL] batch=100/288 samples=404 loss_norm_batch=0.220571
+[EVAL] batch=150/288 samples=604 loss_norm_batch=0.00228323
+[EVAL] batch=200/288 samples=804 loss_norm_batch=0.243167
+[EVAL] batch=250/288 samples=1004 loss_norm_batch=0.0244655
+{
+  "split_name": "val",
+  "checkpoint": "/tank/data/SFS/xinyis/data/bathymetry/MAE-Topography/Downstream_Task_Bathy/cross_validation_v2/runs/holdout_CO_UpperColorado_Topobathy_1_2020/train_holdout_CO_UpperColorado_Topobathy_1_2020_v2_dualmask_corePixelLoss_e400_b4_acc4/checkpoint-best.pth",
+  "n_tiles": 1151,
+  "global_pixel_weighted": {
+    "rmse_m_core_loss_pixel": 0.5478245996456512,
+    "rmse_norm_core_loss_pixel": 0.3924467762737282,
+    "rmse_m_full_loss_pixel": 0.788138988466747,
+    "rmse_norm_full_loss_pixel": 0.528097502832627,
+    "rmse_m_prediction_patch_pixel": 0.976618319767284
+  },
+  "per_tile_summary": {
+    "rmse_m_core_loss_pixel": {
+      "count": 1151,
+      "mean": 0.4461186920719031,
+      "median": 0.37274890188646387,
+      "p75": 0.5372853123974011,
+      "p90": 0.7796741579250644,
+      "p95": 0.982556669040168,
+      "min": 0.06301367370183895,
+      "max": 3.3106314878679526
+    },
+    "rmse_norm_core_loss_pixel": {
+      "count": 1151,
+      "mean": 0.29307730526325626,
+      "median": 0.2042102213253013,
+      "p75": 0.44097079137344075,
+      "p90": 0.6640680960626623,
+      "p95": 0.8361608586999557,
+      "min": 0.01613121063911096,
+      "max": 2.3215126964675044
+    },
+    "tile_std_safe": {
+      "count": 1151,
+      "mean": 4.5623501098927575,
+      "median": 1.4391615092754364,
+      "p75": 6.560847043991089,
+      "p90": 12.401430130004883,
+      "p95": 16.466654062271118,
+      "min": 0.3996383249759674,
+      "max": 47.324546813964844
+    },
+    "norm_to_meter_scale_core": {
+      "count": 1151,
+      "mean": 4.562350114564637,
+      "median": 1.4391615394738853,
+      "p75": 6.56084704200066,
+      "p90": 12.40143012127704,
+      "p95": 16.46665478336059,
+      "min": 0.39963832488041173,
+      "max": 47.32454681524405
+    },
+    "n_core_loss_pixels": {
+      "count": 1151,
+      "mean": 5157.362293657689,
+      "median": 5180.0,
+      "p75": 6165.5,
+      "p90": 6943.0,
+      "p95": 7430.5,
+      "min": 912.0,
+      "max": 10384.0
+    }
+  },
+  "notes": [
+    "rmse_m_core_loss_pixel uses Loss_Mask_Pixel AND core/prediction patch mask AND valid patch mask.",
+    "rmse_norm_core_loss_pixel is the square-root of normalized MSE over the same pixels.",
+    "rmse_m_core_loss_pixel \u2248 rmse_norm_core_loss_pixel * tile_std_safe per tile.",
+    "Large train meter RMSE with small normalized loss usually indicates large tile_std_safe in some train rivers/tiles."
+  ]
+}
+[DONE] /tank/data/SFS/xinyis/data/bathymetry/MAE-Topography/Downstream_Task_Bathy/cross_validation_v2/runs/holdout_CO_UpperColorado_Topobathy_1_2020/train_holdout_CO_UpperColorado_Topobathy_1_2020_v2_dualmask_corePixelLoss_e400_b4_acc4/eval_E050_v2_dualmask_core_pixel_diagnosis/val
+{
+  "train": {
+    "n_tiles": 4016,
+    "rmse_m_core_loss_pixel": 5.537800699341828,
+    "rmse_norm_core_loss_pixel": 0.13780256397240195,
+    "tile_std_safe": {
+      "count": 4016,
+      "mean": 65.18989283919883,
+      "median": 34.38395690917969,
+      "p75": 109.0444450378418,
+      "p90": 175.35582160949707,
+      "p95": 209.2727222442627,
+      "min": 0.36826884001493454,
+      "max": 465.7597961425781
+    }
+  },
+  "val": {
+    "n_tiles": 1151,
+    "rmse_m_core_loss_pixel": 0.5478245996456512,
+    "rmse_norm_core_loss_pixel": 0.3924467762737282,
+    "tile_std_safe": {
+      "count": 1151,
+      "mean": 4.5623501098927575,
+      "median": 1.4391615092754364,
+      "p75": 6.560847043991089,
+      "p90": 12.401430130004883,
+      "p95": 16.466654062271118,
+      "min": 0.3996383249759674,
+      "max": 47.324546813964844
+    }
+  },
+  "interpretation_hint": "If train rmse_norm is small but train rmse_m is large, inspect train/worst_by_tile_std_safe.csv and train/per_river_summary.csv. Meter RMSE scales with tile_std_safe under tile-wise normalization."
+}
+=== DONE E051 ===
+/tank/data/SFS/xinyis/data/bathymetry/MAE-Topography/Downstream_Task_Bathy/cross_validation_v2/runs/holdout_CO_UpperColorado_Topobathy_1_2020/train_holdout_CO_UpperColorado_Topobathy_1_2020_v2_dualmask_corePixelLoss_e400_b4_acc4/eval_E050_v2_dualmask_core_pixel_diagnosis
+Wed Jul  8 10:23:08 CDT 2026
