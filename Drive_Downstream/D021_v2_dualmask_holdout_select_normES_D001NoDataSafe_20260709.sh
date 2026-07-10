@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-#SBATCH -J d021_holdout_normES
+#SBATCH -J d021_holdout_NDsafe
 #SBATCH -p HydroIntel
 #SBATCH -w execute-4006
 #SBATCH -N 1
@@ -7,15 +7,15 @@
 #SBATCH -c 8
 #SBATCH --mem=48G
 #SBATCH -t 7-00:00:00
-#SBATCH -o /tank/data/SFS/xinyis/data/bathymetry/MAE-Topography/Downstream_Task_Bathy/cross_validation_v2/logs/D021_holdout_normES_%j.out
-#SBATCH -e /tank/data/SFS/xinyis/data/bathymetry/MAE-Topography/Downstream_Task_Bathy/cross_validation_v2/logs/D021_holdout_normES_%j.err
+#SBATCH -o /tank/data/SFS/xinyis/data/bathymetry/MAE-Topography/Downstream_Task_Bathy/cross_validation_v2/logs/D021_holdout_NDsafe_%j.out
+#SBATCH -e /tank/data/SFS/xinyis/data/bathymetry/MAE-Topography/Downstream_Task_Bathy/cross_validation_v2/logs/D021_holdout_NDsafe_%j.err
 #SBATCH --chdir=/tank/data/SFS/xinyis/data/bathymetry/MAE-Topography
 #SBATCH --mail-user=zequnlin@uwm.edu
 #SBATCH --mail-type=BEGIN,END,FAIL
 
 set -euo pipefail
 
-# D021 clean: select one whole-river holdout fold and train it with normalized early stopping.
+# D021 D001NoDataSafe: select one whole-river holdout fold and train it with normalized early stopping.
 #
 # Submit examples:
 #   sbatch -p gpu -w execute-3000 --export=ALL,HOLDOUT_PRESET=CO,GPU_ID=0 D021_v2_dualmask_holdout_select_normES_sbatch_20260708.sh
@@ -30,6 +30,17 @@ WORK=${WORK:-$ROOT/Downstream_Task_Bathy}
 CODE=${CODE:-$ROOT/mae_Retrain}
 TILE_ROOT=${TILE_ROOT:-/tank/data/SFS/xinyis/data/bathymetry/Processed_Results/Tiles_for_MAE_v2/Tiles_1m}
 CV_ROOT=${CV_ROOT:-$WORK/cross_validation_v2}
+
+# Tag all new split/run folders so they do not mix with pre-NoDataSafe outputs.
+# Set DATA_TAG="" to recover the original naming behavior.
+DATA_TAG=${DATA_TAG:-D001NoDataSafe}
+if [[ -n "$DATA_TAG" ]]; then
+  SAFE_DATA_TAG=$(echo "$DATA_TAG" | sed 's/[^A-Za-z0-9_]/_/g')
+  DATA_SUFFIX="_${SAFE_DATA_TAG}"
+else
+  SAFE_DATA_TAG=""
+  DATA_SUFFIX=""
+fi
 
 SPLIT_SCRIPT=${SPLIT_SCRIPT:-$WORK/script/A016_v2_holdout_split_20260707_final.py}
 TRAIN_BACKEND=${TRAIN_BACKEND:-$WORK/script/D020_v2_dualmask_coreloss_train_backend_normES_20260708.sh}
@@ -107,19 +118,33 @@ if [[ -z "$HOLDOUT_NAME" || -z "$HOLDOUT_RIVERS" ]]; then
   esac
 fi
 
-SPLIT_DIR=${SPLIT_DIR:-$CV_ROOT/splits/holdout_$HOLDOUT_NAME}
+if [[ -z "${SPLIT_DIR:-}" ]]; then
+  if [[ -n "$DATA_TAG" ]]; then
+    SAFE_HOLDOUT_PRESET=$(echo "$HOLDOUT_PRESET" | sed 's/[^A-Za-z0-9_]/_/g')
+    SPLIT_DIR="$CV_ROOT/splits/holdout_${SAFE_HOLDOUT_PRESET}${DATA_SUFFIX}"
+  else
+    SPLIT_DIR="$CV_ROOT/splits/holdout_$HOLDOUT_NAME"
+  fi
+fi
 
 if [[ -z "${RUN_STAGE:-}" ]]; then
   if [[ "$EPOCHS" -le 5 ]]; then
-    RUN_STAGE="smoke_holdout"
+    RUN_STAGE="smoke_holdout${DATA_SUFFIX}"
   else
-    RUN_STAGE="train_holdout"
+    RUN_STAGE="train_holdout${DATA_SUFFIX}"
   fi
 fi
 
 METRIC_TAG=$(echo "$EARLY_STOP_METRIC" | sed 's/[^A-Za-z0-9_]/_/g')
 RUN_NAME=${RUN_NAME:-${RUN_STAGE}_${HOLDOUT_NAME}_v2_dualmask_corePixelLoss_ES-${METRIC_TAG}_e${EPOCHS}_b${BATCH_SIZE}_acc${ACCUM_ITER}}
-OUT_DIR=${OUT_DIR:-$CV_ROOT/runs/holdout_$HOLDOUT_NAME/$RUN_NAME}
+if [[ -z "${OUT_DIR:-}" ]]; then
+  if [[ -n "$DATA_TAG" ]]; then
+    SAFE_HOLDOUT_PRESET=$(echo "$HOLDOUT_PRESET" | sed 's/[^A-Za-z0-9_]/_/g')
+    OUT_DIR="$CV_ROOT/runs/holdout_${SAFE_HOLDOUT_PRESET}${DATA_SUFFIX}/$RUN_NAME"
+  else
+    OUT_DIR="$CV_ROOT/runs/holdout_$HOLDOUT_NAME/$RUN_NAME"
+  fi
+fi
 LOG_DIR=${LOG_DIR:-$OUT_DIR/tb}
 
 mkdir -p "$CV_ROOT/logs"
@@ -130,6 +155,8 @@ echo "HOST=$(hostname)"
 echo "HOLDOUT_PRESET=$HOLDOUT_PRESET"
 echo "HOLDOUT_NAME=$HOLDOUT_NAME"
 echo "HOLDOUT_RIVERS=$HOLDOUT_RIVERS"
+echo "DATA_TAG=$DATA_TAG"
+echo "DATA_SUFFIX=$DATA_SUFFIX"
 echo "SPLIT_DIR=$SPLIT_DIR"
 echo "RUN_NAME=$RUN_NAME"
 echo "OUT_DIR=$OUT_DIR"

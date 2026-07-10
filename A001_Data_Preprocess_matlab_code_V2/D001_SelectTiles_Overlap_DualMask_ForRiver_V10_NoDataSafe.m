@@ -1,5 +1,5 @@
-function D001_SelectTiles_Overlap_DualMask_ForRiver_V6(rivers, varargin)
-% D001_SelectTiles_Overlap_DualMask_ForRiver_V6
+function D001_SelectTiles_Overlap_DualMask_ForRiver_V10_NoDataSafe(rivers, varargin)
+% D001_SelectTiles_Overlap_DualMask_ForRiver_V10_NoDataSafe
 %
 % New MAE tile sampling / extraction step.
 %
@@ -35,14 +35,14 @@ function D001_SelectTiles_Overlap_DualMask_ForRiver_V6(rivers, varargin)
 %
 % Example:
 %   cd('/tank/data/SFS/xinyis/data/bathymetry/Processed_Results/Z999_scripts/')
-%   D001_SelectTiles_Overlap_DualMask_ForRiver_V6('Kletzch_Combined_UpMax3Null');
-%   D001_SelectTiles_Overlap_DualMask_ForRiver_V6('ALL');
+%   D001_SelectTiles_Overlap_DualMask_ForRiver_V10_NoDataSafe('Kletzch_Combined_UpMax3Null');
+%   D001_SelectTiles_Overlap_DualMask_ForRiver_V10_NoDataSafe('ALL');
 %
 % Useful options:
 %   'resolution', 1                  % keep interface for 1/3/5/10 m
 %   'targetCoreOverlap', 0.50
 %   'targetSpacingPixels', []       % default computed from core width
-%   'minKnownPatchRatio', 0.80       % old 80% known-area rule, now patch-level
+%   'minKnownPatchRatio', 0.70       % patch-level known-area rule; old 80% is often too strict after ANY hidden-patch expansion
 %   'minCoreLossPixelCount', 256      % require enough final-loss pixels in core
 %   'minCoreLossPatchCount', 0        % optional QA/filter for all-pixel loss patches
 %   'corePatchRadius', 3            % MAE code default: 7 x 7 core patches
@@ -58,6 +58,9 @@ function D001_SelectTiles_Overlap_DualMask_ForRiver_V6(rivers, varargin)
 %     bathy valid pixels.
 %   - V6 defaults require a minimum amount of final-loss pixels in the
 %     core area, because the training objective focuses on restoring core bathy.
+%   - V7 adds a candidate-points QA shapefile for GIS inspection of kept/rejected points.
+%   - V9 changes the default requireCenterLoss to false. The center point itself
+%     does not need to be inside final LossMask; core final-loss pixels control this instead.
 
 p = inputParser;
 p.addRequired('rivers');
@@ -72,14 +75,14 @@ p.addParameter('patchSize', 16, @(x)isnumeric(x)&&isscalar(x));
 p.addParameter('corePatchRadius', 3, @(x)isnumeric(x)&&isscalar(x));
 p.addParameter('targetCoreOverlap', 0.50, @(x)isnumeric(x)&&isscalar(x));
 p.addParameter('targetSpacingPixels', [], @(x)isnumeric(x));
-p.addParameter('minKnownPatchRatio', 0.80, @(x)isnumeric(x)&&isscalar(x));
+p.addParameter('minKnownPatchRatio', 0.70, @(x)isnumeric(x)&&isscalar(x));
 p.addParameter('minKnownPatchCount', 0, @(x)isnumeric(x)&&isscalar(x));
 p.addParameter('minCoreLossPatchCount', 0, @(x)isnumeric(x)&&isscalar(x));  % QA/filter only; pixel-level loss is primary
 p.addParameter('minCoreLossPatchRatio', 0.0, @(x)isnumeric(x)&&isscalar(x));
 p.addParameter('minCoreLossPixelCount', 256, @(x)isnumeric(x)&&isscalar(x));
 p.addParameter('minCoreLossPixelRatio', 0.02, @(x)isnumeric(x)&&isscalar(x));
 p.addParameter('minVisiblePatchCount', 1, @(x)isnumeric(x)&&isscalar(x));
-p.addParameter('requireCenterLoss', true, @(x)islogical(x)||ismember(x,[0 1]));
+p.addParameter('requireCenterLoss', false, @(x)islogical(x)||ismember(x,[0 1]));
 p.addParameter('nodataValue', -999999, @(x)isnumeric(x)&&isscalar(x));
 p.addParameter('invalidBelow', -9999, @(x)isnumeric(x)&&isscalar(x));
 p.addParameter('overwrite', true, @(x)islogical(x)||ismember(x,[0 1]));
@@ -112,7 +115,7 @@ riverList = resolveRivers(cfg.rivers);
 resStr = resolutionString(cfg.resolution);
 
 fprintf('\n============================================================\n');
-fprintf('D001 V6 Select MAE tiles with overlap + dual masks\n');
+fprintf('D001 V10 NoDataSafe Select MAE tiles with overlap + dual masks + candidate QA shapefile\n');
 fprintf('Processed root : %s\n', cfg.processedRoot);
 fprintf('Center root    : %s\n', cfg.centerRoot);
 fprintf('Output root    : %s\n', cfg.outputRoot);
@@ -128,9 +131,11 @@ fprintf('Loss output    : 336x336 pixel-level final-loss mask for model loss\n')
 fprintf('Loss patch QA  : ALL final-loss pixels in patch, saved for inspection\n');
 fprintf('Known patch min: ratio >= %.3f, count >= %d (computed from patch-level hidden + input valid)\n', cfg.minKnownPatchRatio, cfg.minKnownPatchCount);
 fprintf('Core loss pixel min: count >= %d, ratio >= %.4f\n', cfg.minCoreLossPixelCount, cfg.minCoreLossPixelRatio);
+fprintf('Center final-loss check: %s (default OFF; core loss pixel rule is used instead)\n', onOff(cfg.requireCenterLoss));
 fprintf('Core loss patch min: count >= %d, ratio >= %.4f (QA/filter only)\n', cfg.minCoreLossPatchCount, cfg.minCoreLossPatchRatio);
 fprintf('NoData         : %g, invalidBelow=%g\n', cfg.nodataValue, cfg.invalidBelow);
 fprintf('Zero as NoData : NO\n');
+fprintf('DEM output NoData : force raw NoData to cfg.nodataValue before WriteRaster\n');
 fprintf('============================================================\n');
 
 % Load GDAL MEX utilities. This code follows the existing preprocessing pipeline.
@@ -148,8 +153,16 @@ for ir = 1:numel(riverList)
 end
 
 fprintf('\n============================================================\n');
-fprintf('D001 V6 finished.\n');
+fprintf('D001 V9 finished.\n');
 fprintf('============================================================\n');
+end
+
+function s = onOff(tf)
+if logical(tf)
+    s = 'ON';
+else
+    s = 'OFF';
+end
 end
 
 function processOneRiver(river, cfg)
@@ -180,7 +193,7 @@ fprintf('Center pts : %s\n', centerShp);
 
 fprintf('[2/5] Read raster metadata...\n');
 [~, rowsM, colsM, geoTrans, proj, dataTypeDEM, ndMerged] = RasterInfo(mergedVrt);
-[~, rowsB, colsB, ~,        ~,    ~,           ~       ] = RasterInfo(bathyVrt);
+[~, rowsB, colsB, ~,        ~,    ~,           ndBathy ] = RasterInfo(bathyVrt);
 [~, rowsH, colsH, ~,        ~,    ~,           ~       ] = RasterInfo(hiddenVrt);
 [~, rowsL, colsL, ~,        ~,    ~,           ~       ] = RasterInfo(lossVrt);
 
@@ -204,6 +217,8 @@ fprintf('Raster rows/cols       : %d / %d\n', rowsM, colsM);
 fprintf('Pixel size             : %.6f / %.6f\n', px, py);
 fprintf('Core width             : %d pixels\n', coreWidthPix);
 fprintf('Target spacing         : %.2f pixels = %.3f map units\n', targetSpacingPixels, targetSpacingMap);
+fprintf('Merged RasterInfo ND   : %.17g\n', double(ndMerged));
+fprintf('Bathy RasterInfo ND    : %.17g\n', double(ndBathy));
 
 outRoot = cfg.outputRoot;
 tileRoot = fullfile(outRoot, sprintf('Tiles_%s', resStr));
@@ -239,6 +254,7 @@ tLoop = tic;
 qaRows = [];
 manifestRows = [];
 selectedStruct = [];
+candidateStruct = [];
 selectedCount = 0;
 checkedCount = 0;
 
@@ -268,6 +284,8 @@ for ii = 1:numel(idxSpacing)
         reject = "out_of_range";
         qaRows = appendQARow(qaRows, srcIdx, NaN, x, y, lineID(srcIdx), width(srcIdx), ...
             row0, col0, false, reject, NaN, NaN, NaN, NaN, NaN, NaN, NaN, NaN, NaN, NaN, NaN, NaN, NaN);
+        candidateStruct = appendCandidatePointStruct(candidateStruct, srcIdx, NaN, x, y, lineID(srcIdx), width(srcIdx), ...
+            row0, col0, false, reject, NaN, NaN, NaN, NaN, NaN, NaN, NaN, NaN, NaN, NaN, NaN, NaN, NaN);
         if cfg.showProgress && (mod(checkedCount, cfg.progressEvery) == 0 || checkedCount == numel(idxSpacing))
             printProgress(river, checkedCount, numel(idxSpacing), selectedCount, tLoop, reject);
         end
@@ -280,7 +298,10 @@ for ii = 1:numel(idxSpacing)
     tileLoss0  = ReadRaster(lossVrt,   r1, c1, h, w);
 
     inputValid = isValidValue(tileDEM, cfg.nodataValue, cfg.invalidBelow);
+    inputValid = inputValid & isValidValue(tileDEM, ndMerged, cfg.invalidBelow);
+
     bathyValid = isValidValue(tileBathy, cfg.nodataValue, cfg.invalidBelow);
+    bathyValid = bathyValid & isValidValue(tileBathy, ndBathy, cfg.invalidBelow);
 
     hiddenPixel = (tileHidden > 0) & (tileHidden < 255) & isfinite(tileHidden);
     manualLossPixel = (tileLoss0 > 0) & (tileLoss0 < 255) & isfinite(tileLoss0);
@@ -349,7 +370,15 @@ knownPatchRatio = knownPatchCount / max(1, totalPatchCount);
                 losViewOut = fullfile(folders.LossPatchView, sprintf('Select_tile_%s_%s_ID%d_LossMaskPatchView_QA.tif', resStr, river, pointID));
                 los21Out = fullfile(folders.LossPatch21, sprintf('Select_tile_%s_%s_ID%d_LossMaskPatch21_QA.tif', resStr, river, pointID));
 
-                writeMaybe(demOut, tileDEM, subGT, proj, dataTypeDEM, 'GTiff', resolveNoData(ndMerged, cfg.nodataValue), cfg.overwrite);
+                % Critical NoData-safe DEM output:
+                % Do not inherit ndMerged from RasterInfo/WriteRaster for Train_tile.
+                % Some environments returned a tiny uninitialized NoData value
+                % (e.g. ~6.9e-310), which then made Python/MAE raw readers treat
+                % NoData pixels as valid 0.  Force DEM raw invalid pixels and
+                % DEM metadata NoData to cfg.nodataValue = -999999.
+                tileDEMOut = double(tileDEM);
+                tileDEMOut(~inputValid) = cfg.nodataValue;
+                writeMaybe(demOut, tileDEMOut, subGT, proj, 6, 'GTiff', cfg.nodataValue, cfg.overwrite);
 
                 % Hidden mask for model: patch-level. Hidden pixel mask is
                 % optional QA only. The exact model token mask should use
@@ -394,6 +423,9 @@ knownPatchRatio = knownPatchCount / max(1, totalPatchCount);
     qaRows = appendQARow(qaRows, srcIdx, pointID, x, y, lineID(srcIdx), width(srcIdx), ...
         row0, col0, isKeep, reject, mean(hiddenPixel(:)), mean(finalLossPixel(:)), mean(bathyValid(:)), ...
         hiddenPatchCount, lossPatchCount, visiblePatchCount, knownPatchCount, knownPatchRatio, coreHiddenCount, coreLossCount, coreLossRatio, coreLossPixelCount, coreLossPixelRatio);
+    candidateStruct = appendCandidatePointStruct(candidateStruct, srcIdx, pointID, x, y, lineID(srcIdx), width(srcIdx), ...
+        row0, col0, isKeep, reject, mean(hiddenPixel(:)), mean(finalLossPixel(:)), mean(bathyValid(:)), ...
+        hiddenPatchCount, lossPatchCount, visiblePatchCount, knownPatchCount, knownPatchRatio, coreHiddenCount, coreLossCount, coreLossRatio, coreLossPixelCount, coreLossPixelRatio);
 
     if cfg.showProgress && (mod(checkedCount, cfg.progressEvery) == 0 || checkedCount == numel(idxSpacing))
         printProgress(river, checkedCount, numel(idxSpacing), selectedCount, tLoop, reject);
@@ -414,6 +446,16 @@ qaTable = qaRowsToTable(qaRows);
 qaCsv = fullfile(folders.QA, sprintf('D001_candidate_patch_QA_%s_%s.csv', resStr, river));
 writetable(qaTable, qaCsv);
 fprintf('QA CSV: %s\n', qaCsv);
+
+% Write all spacing-thinned candidate points with keep/reject QA fields.
+if ~isempty(candidateStruct)
+    outCandPts = fullfile(folders.QA, sprintf('D001_candidate_points_QA_%s_%s.shp', resStr, river));
+    shapewrite(candidateStruct, outCandPts);
+    copyPrj(centerShp, outCandPts);
+    fprintf('Candidate QA point shp: %s\n', outCandPts);
+else
+    warning('No candidate QA points for %s.', river);
+end
 
 % Write selected point shapefile.
 if ~isempty(selectedStruct)
@@ -593,9 +635,16 @@ end
 function valid = isValidValue(A, nodata, invalidBelow)
 A = double(A);
 valid = isfinite(A) & (A > invalidBelow);
-if ~isempty(nodata) && isfinite(nodata)
-    tol = max(1e-6, abs(double(nodata)) * 1e-7);
-    valid = valid & (abs(A - double(nodata)) > tol);
+
+% Exclude the explicitly provided NoData only if it is a meaningful value.
+% RasterInfo/WriteRaster can occasionally return an uninitialized tiny double
+% such as 6.9e-310.  That must not become a real NoData threshold/value.
+if ~isempty(nodata) && isfinite(double(nodata))
+    nd = double(nodata);
+    if abs(nd) > 1e-12
+        tol = max(1e-6, abs(nd) * 1e-7);
+        valid = valid & (abs(A - nd) > tol);
+    end
 end
 end
 
@@ -676,10 +725,8 @@ end
 % striped-looking 0/1 rasters even though the intended output data type is
 % Byte.  Therefore all Byte masks are passed as double 0/1 arrays while
 % dataType=1 still writes Byte GeoTIFF.
-if dataType == 1
-    A = double(A);
-    A(~isfinite(A)) = nodata;
-end
+A = double(A);
+A(~isfinite(A)) = nodata;
 WriteRaster(outPath, A, geoTrans, proj, dataType, outFormat, nodata);
 end
 
@@ -745,6 +792,85 @@ if isempty(rows)
     T = table();
 else
     T = struct2table(rows);
+end
+end
+
+
+function S = appendCandidatePointStruct(S, srcIdx, pointID, x, y, lineID, width, row0, col0, kept, reject, ...
+    hiddenPixRatio, lossPixRatio, bathyValidRatio, hiddenPatchCount, lossPatchCount, visiblePatchCount, knownPatchCount, knownPatchRatio, coreHiddenCount, coreLossCount, coreLossRatio, coreLossPixelCount, coreLossPixelRatio)
+% Candidate point shapefile for GIS QA.  Short DBF field names are used for
+% ArcMap/shapefile compatibility.  Numeric missing values are written as
+% -9999 so the fields can be symbolized/filterable in ArcMap.
+r.Geometry = 'Point';
+r.X = x;
+r.Y = y;
+r.SrcID = safeInt(srcIdx, 0);
+r.PointID = safeInt(pointID, 0);        % 0 = not selected
+r.Kept = double(kept);
+r.Reject = char(reject);
+r.RjCode = rejectCode(reject);          % numeric code for easy ArcMap symbology
+r.LineID = safeNum(lineID, -9999);
+r.Width = safeNum(width, -9999);
+r.Row0 = safeNum(row0, -9999);
+r.Col0 = safeNum(col0, -9999);
+r.HPixR = safeNum(hiddenPixRatio, -9999);
+r.LPixR = safeNum(lossPixRatio, -9999);
+r.BValR = safeNum(bathyValidRatio, -9999);
+r.HidPN = safeNum(hiddenPatchCount, -9999);
+r.LossPN = safeNum(lossPatchCount, -9999);
+r.VisPN = safeNum(visiblePatchCount, -9999);
+r.KnownPN = safeNum(knownPatchCount, -9999);
+r.KnownR = safeNum(knownPatchRatio, -9999);
+r.CHidPN = safeNum(coreHiddenCount, -9999);
+r.CLossPN = safeNum(coreLossCount, -9999);
+r.CLossPR = safeNum(coreLossRatio, -9999);
+r.CLossPixN = safeNum(coreLossPixelCount, -9999);
+r.CLossPixR = safeNum(coreLossPixelRatio, -9999);
+if isempty(S)
+    S = r;
+else
+    S(end+1,1) = r;
+end
+end
+
+function v = safeNum(x, fillv)
+if isempty(x) || ~isnumeric(x) || ~isfinite(double(x(1)))
+    v = fillv;
+else
+    v = double(x(1));
+end
+end
+
+function v = safeInt(x, fillv)
+v = safeNum(x, fillv);
+if isfinite(v), v = round(v); end
+end
+
+function c = rejectCode(reject)
+s = char(reject);
+switch s
+    case 'kept'
+        c = 0;
+    case 'out_of_range'
+        c = 1;
+    case 'center_not_final_loss'
+        c = 2;
+    case 'known_patch_count'
+        c = 3;
+    case 'known_patch_ratio'
+        c = 4;
+    case 'core_loss_pixel_count'
+        c = 5;
+    case 'core_loss_pixel_ratio'
+        c = 6;
+    case 'core_loss_patch_count'
+        c = 7;
+    case 'core_loss_patch_ratio'
+        c = 8;
+    case 'visible_patch_count'
+        c = 9;
+    otherwise
+        c = 99;
 end
 end
 

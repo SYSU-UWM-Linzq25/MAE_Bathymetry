@@ -1,5 +1,5 @@
-function E001_SelectTiles_Overlap_FullRiver_ForRiver(rivers, varargin)
-% E001_SelectTiles_Overlap_FullRiver_ForRiver
+function E001_SelectTiles_Overlap_FullRiver_ForRiver_V5_NoDataSafe(rivers, varargin)
+% E001_SelectTiles_Overlap_FullRiver_ForRiver_V5_NoDataSafe
 %
 % Full-river / inference-style MAE tile extraction.
 %
@@ -18,23 +18,29 @@ function E001_SelectTiles_Overlap_FullRiver_ForRiver(rivers, varargin)
 %      full tile is inside the raster extent.
 %   4) No filtering by known_patch_ratio, HiddenMask, LossMask, core loss, or
 %      bathy valid is applied.
-%   5) Optionally extract HiddenMask products for inference/model masking,
-%      but HiddenMask is NOT used to reject tiles.
+%   5) Extract HiddenMask products for model input masking when available.
+%   6) Extract pixel-level final LossMask = LossMask AND bathy-valid for
+%      full-river recovery / output mosaicking.
+%   7) Also output Core_Mask_Pixel and Core_Loss_Mask_Pixel. Downstream
+%      stitching should average predictions where core-loss pixels from
+%      different tile centers overlap.
 %
 % Required raster:
 %   Processed_Results/Bathy3DEP_Merged_<res>m_FixND/<river>/Combined_BathyPriority_<res>m.vrt
 %
-% Optional raster:
+% Optional/required mask rasters:
 %   BahtyMask_Corage_Manual_Finial_Draw/HiddenMask_ByRiver_<res>m/<river>/HiddenMask_<res>m.vrt
+%   LossMask_Draw/LossMask_ByRiver_<res>m/<river>/LossMask_<res>m.vrt
+%   Processed_Results/Bathy_<res>m_FixND/<river>/Bathy_<res>m.vrt  (used to gate final loss mask by bathy-valid pixels)
 %
 % Output:
 %   Processed_Results/Tiles_for_MAE_FullRiver_E001/Tiles_<res>m/...
 %
 % Example:
 %   cd('/tank/data/SFS/xinyis/data/bathymetry/Processed_Results/Z999_scripts/')
-%   E001_SelectTiles_Overlap_FullRiver_ForRiver('Kletzch_Combined_UpMax3Null');
-%   E001_SelectTiles_Overlap_FullRiver_ForRiver('ALL', 'resolution', 1);
-%   E001_SelectTiles_Overlap_FullRiver_ForRiver('ALL', 'resolution', 3);
+%   E001_SelectTiles_Overlap_FullRiver_ForRiver_V5_NoDataSafe('Kletzch_Combined_UpMax3Null');
+%   E001_SelectTiles_Overlap_FullRiver_ForRiver_V5_NoDataSafe('ALL', 'resolution', 1);
+%   E001_SelectTiles_Overlap_FullRiver_ForRiver_V5_NoDataSafe('ALL', 'resolution', 3);
 %
 % Notes:
 %   - Tile size / patch size follow MAE: 336 and 16 by default.
@@ -42,12 +48,16 @@ function E001_SelectTiles_Overlap_FullRiver_ForRiver(rivers, varargin)
 %     targetCoreOverlap=0.50, so target spacing is 56 pixels.
 %   - Out-of-range points are skipped to keep exact fixed-size tiles fully supported by raster data.
 %   - HiddenMask output is patch-view 336x336, using ANY hidden pixel in each
-%     16x16 patch.  This is for model/inference use, not a sampling filter.
+%     16x16 patch. This is for model/inference input masking, not a sampling filter.
+%   - LossMask output is 336x336 pixel-level final loss/recovery mask.
+%   - Core_Loss_Mask_Pixel marks the part to use during mosaicking; overlapping
+%     core predictions should be averaged by sum/count.
 
 p = inputParser;
 p.addRequired('rivers');
 p.addParameter('processedRoot', '/tank/data/SFS/xinyis/data/bathymetry/Processed_Results', @ischar);
 p.addParameter('hiddenRoot', '/tank/data/SFS/xinyis/data/bathymetry/BahtyMask_Corage_Manual_Finial_Draw', @ischar);
+p.addParameter('lossRoot', '/tank/data/SFS/xinyis/data/bathymetry/LossMask_Draw', @ischar);
 p.addParameter('centerRoot', '/tank/data/SFS/xinyis/data/bathymetry/Center_line_points_1st/AutoClip_By_BathyMask', @ischar);
 p.addParameter('outputRoot', '/tank/data/SFS/xinyis/data/bathymetry/Processed_Results/Tiles_for_MAE_FullRiver_E001', @ischar);
 p.addParameter('resolution', 1, @(x)isnumeric(x)&&isscalar(x));
@@ -60,7 +70,13 @@ p.addParameter('writeHiddenMask', true, @(x)islogical(x)||ismember(x,[0 1]));
 p.addParameter('writeHiddenPixelQA', true, @(x)islogical(x)||ismember(x,[0 1]));
 p.addParameter('writeHiddenPatch21QA', true, @(x)islogical(x)||ismember(x,[0 1]));
 p.addParameter('requireHiddenRaster', false, @(x)islogical(x)||ismember(x,[0 1]));
+p.addParameter('writeLossMask', true, @(x)islogical(x)||ismember(x,[0 1]));
+p.addParameter('writeCoreMask', true, @(x)islogical(x)||ismember(x,[0 1]));
+p.addParameter('writeCoreLossMask', true, @(x)islogical(x)||ismember(x,[0 1]));
+p.addParameter('requireLossRaster', true, @(x)islogical(x)||ismember(x,[0 1]));
+p.addParameter('useBathyValidForLossMask', true, @(x)islogical(x)||ismember(x,[0 1]));
 p.addParameter('nodataValue', -999999, @(x)isnumeric(x)&&isscalar(x));
+p.addParameter('invalidBelow', -9999, @(x)isnumeric(x)&&isscalar(x));
 p.addParameter('overwrite', true, @(x)islogical(x)||ismember(x,[0 1]));
 p.addParameter('maxTilesPerRiver', inf, @(x)isnumeric(x)&&isscalar(x));
 p.addParameter('skipWriteTiles', false, @(x)islogical(x)||ismember(x,[0 1]));
@@ -92,7 +108,7 @@ else
 end
 
 fprintf('\n============================================================\n');
-fprintf('E001 Full-river MAE tiles with overlap only\n');
+fprintf('E001 V5 NoDataSafe Full-river MAE tiles with overlap only + pixel LossMask + core averaging masks [no Mapping Toolbox]\n');
 fprintf('Processed root : %s\n', cfg.processedRoot);
 fprintf('Center root    : %s\n', cfg.centerRoot);
 fprintf('Output root    : %s\n', cfg.outputRoot);
@@ -105,8 +121,11 @@ fprintf('Core radius    : %d patches => %d x %d core patches\n', cfg.corePatchRa
 fprintf('Target overlap : %.2f\n', cfg.targetCoreOverlap);
 fprintf('Target spacing : %.2f pixels before map-unit conversion\n', targetSpacingPixels0);
 fprintf('Filters        : spacing + full-tile in range ONLY\n');
-fprintf('No known/loss/hidden filter is applied.\n');
+fprintf('DEM output ND  : force raw invalid DEM pixels and metadata NoData to cfg.nodataValue\n');
+fprintf('No known/loss/hidden filter is applied for tile selection.\n');
 fprintf('Write Hidden   : %s, require hidden raster: %s\n', onOff(cfg.writeHiddenMask), onOff(cfg.requireHiddenRaster));
+fprintf('Write Loss     : %s, require loss raster: %s, bathy-valid gating: %s\n', onOff(cfg.writeLossMask), onOff(cfg.requireLossRaster), onOff(cfg.useBathyValidForLossMask));
+fprintf('Core masks     : core mask=%s, core-loss mask=%s; later mosaicking should average overlapping core-loss pixels.\n', onOff(cfg.writeCoreMask), onOff(cfg.writeCoreLossMask));
 fprintf('============================================================\n');
 
 cd('/tank/data/SFS/xinyis/src/MEX_2.3.0'); GDALLoad();
@@ -136,21 +155,33 @@ PR = cfg.processedRoot;
 resStr = resolutionString(cfg.resolution);
 mergedVrt = fullfile(PR, sprintf('Bathy3DEP_Merged_%s_FixND', resStr), river, sprintf('Combined_BathyPriority_%s.vrt', resStr));
 hiddenVrt = fullfile(cfg.hiddenRoot, sprintf('HiddenMask_ByRiver_%s', resStr), river, sprintf('HiddenMask_%s.vrt', resStr));
+lossVrt   = fullfile(cfg.lossRoot,   sprintf('LossMask_ByRiver_%s', resStr),   river, sprintf('LossMask_%s.vrt', resStr));
+bathyVrt  = fullfile(PR, sprintf('Bathy_%s_FixND', resStr), river, sprintf('Bathy_%s.vrt', resStr));
 centerShp = fullfile(cfg.centerRoot, river, 'ESA_WorldCover_Width_proj_Clip.shp');
 
 fprintf('[1/4] Check input files for %s resolution...\n', resStr);
 mustExist(mergedVrt, sprintf('merged %s DEM', resStr));
 mustExist(centerShp, 'centerline point shp');
 hasHidden = exist(hiddenVrt, 'file') == 2;
+hasLoss = exist(lossVrt, 'file') == 2;
+hasBathy = exist(bathyVrt, 'file') == 2;
 if cfg.writeHiddenMask && cfg.requireHiddenRaster && ~hasHidden
     error('Missing hidden mask raster: %s', hiddenVrt);
 end
 if cfg.writeHiddenMask && ~hasHidden
     warning('Hidden mask raster not found. DEM tiles will be extracted, hidden outputs skipped: %s', hiddenVrt);
 end
+if cfg.writeLossMask && cfg.requireLossRaster && ~hasLoss
+    error('Missing loss mask raster: %s', lossVrt);
+end
+if cfg.writeLossMask && cfg.useBathyValidForLossMask && ~hasBathy
+    error('Missing bathy raster needed for final loss mask: %s', bathyVrt);
+end
 
 fprintf('Merged DEM : %s\n', mergedVrt);
 fprintf('HiddenMask : %s [%s]\n', hiddenVrt, ternary(hasHidden, 'found', 'missing/skipped'));
+fprintf('LossMask   : %s [%s]\n', lossVrt, ternary(hasLoss, 'found', 'missing/skipped'));
+fprintf('Bathy DEM  : %s [%s]\n', bathyVrt, ternary(hasBathy, 'found', 'missing/skipped'));
 fprintf('Center pts : %s\n', centerShp);
 
 fprintf('[2/4] Read raster metadata...\n');
@@ -160,6 +191,20 @@ if hasHidden
     if rowsM ~= rowsH || colsM ~= colsH
         error('Grid size mismatch for %s: merged=%d/%d hidden=%d/%d', river, rowsM, colsM, rowsH, colsH);
     end
+end
+if hasLoss
+    [~, rowsL, colsL, ~, ~, ~, ~] = RasterInfo(lossVrt);
+    if rowsM ~= rowsL || colsM ~= colsL
+        error('Grid size mismatch for %s: merged=%d/%d loss=%d/%d', river, rowsM, colsM, rowsL, colsL);
+    end
+end
+if hasBathy
+    [~, rowsB, colsB, ~, ~, ~, ndBathy] = RasterInfo(bathyVrt);
+    if rowsM ~= rowsB || colsM ~= colsB
+        error('Grid size mismatch for %s: merged=%d/%d bathy=%d/%d', river, rowsM, colsM, rowsB, colsB);
+    end
+else
+    ndBathy = cfg.nodataValue;
 end
 
 px = abs(geoTrans(2));
@@ -177,6 +222,8 @@ fprintf('Raster rows/cols       : %d / %d\n', rowsM, colsM);
 fprintf('Pixel size             : %.6f / %.6f\n', px, py);
 fprintf('Core width             : %d pixels\n', coreWidthPix);
 fprintf('Target spacing         : %.2f pixels = %.3f map units\n', targetSpacingPixels, targetSpacingMap);
+fprintf('Merged RasterInfo ND   : %.17g\n', double(ndMerged));
+fprintf('Bathy RasterInfo ND    : %.17g\n', double(ndBathy));
 
 outRoot = cfg.outputRoot;
 tileRoot = fullfile(outRoot, sprintf('Tiles_%s', resStr));
@@ -184,22 +231,25 @@ folders.Train           = fullfile(tileRoot, 'FullRiver_tile');
 folders.HiddenPatchView = fullfile(tileRoot, 'Hidden_Mask');
 folders.HiddenPixelQA   = fullfile(tileRoot, 'Hidden_Mask_Pixel_QA');
 folders.HiddenPatch21   = fullfile(tileRoot, 'Hidden_Mask_Patch21_QA');
+folders.LossPixel       = fullfile(tileRoot, 'Loss_Mask_Pixel');
+folders.CoreMask        = fullfile(tileRoot, 'Core_Mask_Pixel');
+folders.CoreLossMask    = fullfile(tileRoot, 'Core_Loss_Mask_Pixel');
 folders.QA              = fullfile(outRoot, 'QA', river);
 folders.Lists           = fullfile(outRoot, 'Lists');
 makeFolders(folders);
 
 fprintf('[3/4] Read and thin centerline points...\n');
-GT = readCenterShpSafe(centerShp, fullfile(folders.QA, '_tmp_centerline_xy'));
-if isempty(GT)
+CT = readCenterPointsWithOGR(centerShp, fullfile(folders.QA, '_tmp_centerline_csv'));
+if isempty(CT) || height(CT) == 0
     error('Centerline shapefile has no points: %s', centerShp);
 end
-[X, Y] = extractPointXY(GT);
-lineID = extractNumericField(GT, {'line_ID','LineID','LINEID','Line_ID','lineid'}, (1:numel(GT)).');
-width  = extractNumericField(GT, {'Width','WIDTH','width','wid','WID'}, nan(numel(GT),1));
+[X, Y] = extractXYFromTable(CT);
+lineID = extractNumericTableField(CT, {'line_ID','LineID','LINEID','Line_ID','lineid'}, (1:height(CT)).');
+width  = extractNumericTableField(CT, {'Width','WIDTH','width','wid','WID'}, nan(height(CT),1));
 
 keepSpacing = thinByLineSpacing(X, Y, lineID, targetSpacingMap);
 idxSpacing = find(keepSpacing);
-fprintf('Raw center points      : %d\n', numel(GT));
+fprintf('Raw center points      : %d\n', height(CT));
 fprintf('After spacing thinning : %d\n', numel(idxSpacing));
 
 fprintf('[4/4] Extract every in-range tile; no mask/quality filters...\n');
@@ -214,6 +264,8 @@ checkedCount = 0;
 hr = floor(cfg.tileSize / 2);
 hc = floor(cfg.tileSize / 2);
 patchGrid = cfg.tileSize / cfg.patchSize;
+coreMask = makeCoreMask(cfg.tileSize, cfg.patchSize, cfg.corePatchRadius);
+corePixelCount = nnz(coreMask);
 
 for ii = 1:numel(idxSpacing)
     srcIdx = idxSpacing(ii);
@@ -229,8 +281,8 @@ for ii = 1:numel(idxSpacing)
     reject = "";
     if r1 < 1 || c1 < 1 || (r1 + h - 1) > rowsM || (c1 + w - 1) > colsM
         reject = "out_of_range";
-        qaRows = appendQARow(qaRows, srcIdx, NaN, x, y, lineID(srcIdx), width(srcIdx), row0, col0, false, reject, NaN, NaN, NaN);
-        candidateStruct = appendCandidatePointStruct(candidateStruct, srcIdx, NaN, x, y, lineID(srcIdx), width(srcIdx), row0, col0, false, reject, NaN, NaN, NaN);
+        qaRows = appendQARow(qaRows, srcIdx, NaN, x, y, lineID(srcIdx), width(srcIdx), row0, col0, false, reject, NaN, NaN, NaN, NaN, NaN);
+        candidateStruct = appendCandidatePointStruct(candidateStruct, srcIdx, NaN, x, y, lineID(srcIdx), width(srcIdx), row0, col0, false, reject, NaN, NaN, NaN, NaN, NaN);
         if cfg.showProgress && (mod(checkedCount, cfg.progressEvery) == 0 || checkedCount == numel(idxSpacing))
             printProgress(river, checkedCount, numel(idxSpacing), selectedCount, tLoop, reject);
         end
@@ -238,6 +290,9 @@ for ii = 1:numel(idxSpacing)
     end
 
     tileDEM = ReadRaster(mergedVrt, r1, c1, h, w);
+    inputValid = isValidValue(tileDEM, cfg.nodataValue, cfg.invalidBelow);
+    inputValid = inputValid & isValidValue(tileDEM, ndMerged, cfg.invalidBelow);
+
     hasHiddenTile = false;
     hiddenPixelRatio = NaN;
     hiddenPatchCount = NaN;
@@ -252,6 +307,28 @@ for ii = 1:numel(idxSpacing)
         hiddenPatchCount = nnz(hiddenPatch);
         hiddenPatchRatio = hiddenPatchCount / max(1, patchGrid * patchGrid);
         hasHiddenTile = true;
+    end
+
+    hasLossTile = false;
+    lossPixelRatio = NaN;
+    coreLossPixelRatio = NaN;
+    finalLossPixel = [];
+    coreLossPixel = [];
+    if cfg.writeLossMask && hasLoss
+        tileLoss = ReadRaster(lossVrt, r1, c1, h, w);
+        lossCandidate = (tileLoss > 0) & (tileLoss < 255) & isfinite(tileLoss);
+        if cfg.useBathyValidForLossMask
+            tileBathy = ReadRaster(bathyVrt, r1, c1, h, w);
+            bathyValid = isValidValue(tileBathy, cfg.nodataValue, cfg.invalidBelow);
+            bathyValid = bathyValid & isValidValue(tileBathy, ndBathy, cfg.invalidBelow);
+            finalLossPixel = lossCandidate & bathyValid;
+        else
+            finalLossPixel = lossCandidate;
+        end
+        coreLossPixel = finalLossPixel & coreMask;
+        lossPixelRatio = mean(finalLossPixel(:));
+        coreLossPixelRatio = nnz(coreLossPixel) / max(1, corePixelCount);
+        hasLossTile = true;
     end
 
     reject = "kept";
@@ -269,8 +346,17 @@ for ii = 1:numel(idxSpacing)
             hidViewOut = '';
             hidPixOut = '';
             hid21Out = '';
+            lossOut = '';
+            coreOut = '';
+            coreLossOut = '';
 
-            writeMaybe(demOut, tileDEM, subGT, proj, dataTypeDEM, 'GTiff', resolveNoData(ndMerged, cfg.nodataValue), cfg.overwrite);
+            % Critical NoData-safe DEM output:
+            % E001 full-river DEM tiles are later read by Python/MAE raw readers.
+            % Do not inherit ndMerged from RasterInfo/WriteRaster. Force invalid
+            % DEM raw values and metadata NoData to cfg.nodataValue = -999999.
+            tileDEMOut = double(tileDEM);
+            tileDEMOut(~inputValid) = cfg.nodataValue;
+            writeMaybe(demOut, tileDEMOut, subGT, proj, 6, 'GTiff', cfg.nodataValue, cfg.overwrite);
 
             if hasHiddenTile
                 hidViewOut = fullfile(folders.HiddenPatchView, sprintf('E001_tile_%s_%s_ID%d_HiddenMask.tif', resStr, river, pointID));
@@ -291,14 +377,27 @@ for ii = 1:numel(idxSpacing)
                 end
             end
 
-            manifestRows = appendManifestRow(manifestRows, pointID, river, demOut, hidViewOut, hidPixOut, hid21Out);
+            if hasLossTile
+                lossOut = fullfile(folders.LossPixel, sprintf('E001_tile_%s_%s_ID%d_LossMaskPixel.tif', resStr, river, pointID));
+                writeMaybe(lossOut, double(finalLossPixel), subGT, proj, 1, 'GTiff', 255, cfg.overwrite);
+                if cfg.writeCoreMask
+                    coreOut = fullfile(folders.CoreMask, sprintf('E001_tile_%s_%s_ID%d_CoreMaskPixel.tif', resStr, river, pointID));
+                    writeMaybe(coreOut, double(coreMask), subGT, proj, 1, 'GTiff', 255, cfg.overwrite);
+                end
+                if cfg.writeCoreLossMask
+                    coreLossOut = fullfile(folders.CoreLossMask, sprintf('E001_tile_%s_%s_ID%d_CoreLossMaskPixel.tif', resStr, river, pointID));
+                    writeMaybe(coreLossOut, double(coreLossPixel), subGT, proj, 1, 'GTiff', 255, cfg.overwrite);
+                end
+            end
+
+            manifestRows = appendManifestRow(manifestRows, pointID, river, demOut, hidViewOut, hidPixOut, hid21Out, lossOut, coreOut, coreLossOut);
         end
 
-        selectedStruct = appendPointStruct(selectedStruct, pointID, srcIdx, x, y, lineID(srcIdx), width(srcIdx), row0, col0, hiddenPixelRatio, hiddenPatchCount, hiddenPatchRatio);
+        selectedStruct = appendPointStruct(selectedStruct, pointID, srcIdx, x, y, lineID(srcIdx), width(srcIdx), row0, col0, hiddenPixelRatio, hiddenPatchCount, hiddenPatchRatio, lossPixelRatio, coreLossPixelRatio);
     end
 
-    qaRows = appendQARow(qaRows, srcIdx, pointID, x, y, lineID(srcIdx), width(srcIdx), row0, col0, true, reject, hiddenPixelRatio, hiddenPatchCount, hiddenPatchRatio);
-    candidateStruct = appendCandidatePointStruct(candidateStruct, srcIdx, pointID, x, y, lineID(srcIdx), width(srcIdx), row0, col0, true, reject, hiddenPixelRatio, hiddenPatchCount, hiddenPatchRatio);
+    qaRows = appendQARow(qaRows, srcIdx, pointID, x, y, lineID(srcIdx), width(srcIdx), row0, col0, true, reject, hiddenPixelRatio, hiddenPatchCount, hiddenPatchRatio, lossPixelRatio, coreLossPixelRatio);
+    candidateStruct = appendCandidatePointStruct(candidateStruct, srcIdx, pointID, x, y, lineID(srcIdx), width(srcIdx), row0, col0, true, reject, hiddenPixelRatio, hiddenPatchCount, hiddenPatchRatio, lossPixelRatio, coreLossPixelRatio);
 
     if cfg.showProgress && (mod(checkedCount, cfg.progressEvery) == 0 || checkedCount == numel(idxSpacing))
         printProgress(river, checkedCount, numel(idxSpacing), selectedCount, tLoop, reject);
@@ -320,8 +419,8 @@ fprintf('QA CSV: %s\n', qaCsv);
 
 if ~isempty(candidateStruct)
     outCandPts = fullfile(folders.QA, sprintf('E001_candidate_points_QA_%s_%s.shp', resStr, river));
-    shapewrite(candidateStruct, outCandPts);
-    copyPrj(centerShp, outCandPts);
+    candTable = pointStructToTable(candidateStruct);
+    writePointShpWithOGR(candTable, outCandPts, centerShp, fullfile(folders.QA, '_tmp_candidate_points_csvshp'));
     fprintf('Candidate QA point shp: %s\n', outCandPts);
 else
     warning('No candidate QA points for %s.', river);
@@ -329,8 +428,8 @@ end
 
 if ~isempty(selectedStruct)
     outPts = fullfile(folders.QA, sprintf('E001_selected_points_%s_%s.shp', resStr, river));
-    shapewrite(selectedStruct, outPts);
-    copyPrj(centerShp, outPts);
+    selTable = pointStructToTable(selectedStruct);
+    writePointShpWithOGR(selTable, outPts, centerShp, fullfile(folders.QA, '_tmp_selected_points_csvshp'));
     fprintf('Selected point shp: %s\n', outPts);
 else
     warning('No selected points for %s.', river);
@@ -345,6 +444,12 @@ writetable(manifestTable, manifestCsv);
     writeList(fullfile(folders.Lists, sprintf('E001_fullriver_tiles_%s_%s.txt', resStr, river)), manifestTable.dem_path);
     if ismember('hidden_mask_path', manifestTable.Properties.VariableNames)
         writeList(fullfile(folders.Lists, sprintf('E001_hidden_masks_336patchview_%s_%s.txt', resStr, river)), manifestTable.hidden_mask_path);
+    end
+    if ismember('loss_mask_pixel_path', manifestTable.Properties.VariableNames)
+        writeList(fullfile(folders.Lists, sprintf('E001_loss_masks_pixel_%s_%s.txt', resStr, river)), manifestTable.loss_mask_pixel_path);
+    end
+    if ismember('core_loss_mask_pixel_path', manifestTable.Properties.VariableNames)
+        writeList(fullfile(folders.Lists, sprintf('E001_core_loss_masks_pixel_%s_%s.txt', resStr, river)), manifestTable.core_loss_mask_pixel_path);
     end
 end
 end
@@ -518,6 +623,169 @@ for k = 1:numel(u)
 end
 end
 
+
+function T = readCenterPointsWithOGR(centerShp, tmpDir)
+% Read point/PointZ shapefile without MATLAB Mapping Toolbox.
+% Uses ogr2ogr CSV driver with GEOMETRY=AS_XY, so PointZ is flattened to X/Y.
+%
+% Important GDAL behavior:
+%   For -f CSV, the output directory must NOT be pre-created. The CSV
+%   driver creates it. If the directory already exists, some GDAL builds
+%   fail with "file system object ... already exists". Therefore we remove
+%   any old temp folder and pass a non-existing csvOutDir to ogr2ogr.
+if exist(tmpDir, 'dir') == 7
+    rmdir(tmpDir, 's');
+end
+mkdir(tmpDir);
+
+csvOutDir = fullfile(tmpDir, 'csv_out');
+if exist(csvOutDir, 'dir') == 7
+    rmdir(csvOutDir, 's');
+elseif exist(csvOutDir, 'file') == 2
+    delete(csvOutDir);
+end
+
+layerName = 'center_points';
+cmd = sprintf('ogr2ogr -overwrite -f CSV -lco GEOMETRY=AS_XY "%s" "%s" -nln %s', csvOutDir, centerShp, layerName);
+[status, out] = system(cmd);
+if status ~= 0
+    error('ogr2ogr shapefile->CSV failed:\n%s\nCommand:\n%s', out, cmd);
+end
+csvPath = fullfile(csvOutDir, [layerName '.csv']);
+if exist(csvPath, 'file') ~= 2
+    % Some GDAL versions keep the original layer name. Fall back to the first CSV.
+    d = dir(fullfile(csvOutDir, '*.csv'));
+    if isempty(d)
+        error('ogr2ogr produced no CSV in: %s', csvOutDir);
+    end
+    csvPath = fullfile(csvOutDir, d(1).name);
+end
+T = readtable(csvPath, 'VariableNamingRule', 'preserve');
+fprintf('Center shp read mode  : ogr2ogr CSV, no Mapping Toolbox license required\n');
+end
+function [X, Y] = extractXYFromTable(T)
+vars = T.Properties.VariableNames;
+ix = find(strcmpi(vars, 'X'), 1);
+iy = find(strcmpi(vars, 'Y'), 1);
+if isempty(ix) || isempty(iy)
+    error('Cannot find X/Y columns in ogr2ogr CSV. Available columns: %s', strjoin(vars, ', '));
+end
+X = tableColumnToDouble(T.(vars{ix}));
+Y = tableColumnToDouble(T.(vars{iy}));
+if any(~isfinite(X)) || any(~isfinite(Y))
+    error('Some centerline point X/Y values are not finite.');
+end
+end
+
+function vals = extractNumericTableField(T, candidates, defaultVals)
+vars = T.Properties.VariableNames;
+vals = defaultVals(:);
+chosen = '';
+for c = 1:numel(candidates)
+    k = find(strcmpi(vars, candidates{c}), 1);
+    if ~isempty(k)
+        chosen = vars{k};
+        break;
+    end
+end
+if isempty(chosen), return; end
+v = tableColumnToDouble(T.(chosen));
+if numel(v) == numel(vals)
+    good = isfinite(v);
+    vals(good) = v(good);
+end
+end
+
+function v = tableColumnToDouble(col)
+if isnumeric(col)
+    v = double(col);
+elseif iscell(col)
+    v = nan(numel(col),1);
+    for i = 1:numel(col)
+        if isnumeric(col{i})
+            v(i) = double(col{i}(1));
+        else
+            v(i) = str2double(string(col{i}));
+        end
+    end
+elseif isstring(col) || ischar(col)
+    v = str2double(string(col));
+else
+    try
+        v = double(col);
+    catch
+        v = str2double(string(col));
+    end
+end
+v = v(:);
+end
+
+function T = pointStructToTable(S)
+T = struct2table(S);
+% Remove Mapping Toolbox geometry field. OGR will build geometry from X/Y.
+if ismember('Geometry', T.Properties.VariableNames)
+    T.Geometry = [];
+end
+% Keep field names short for Shapefile compatibility.
+T.Properties.VariableNames = matlab.lang.makeValidName(T.Properties.VariableNames);
+end
+
+function writePointShpWithOGR(T, outShp, srcShp, tmpDir)
+% Write point shapefile without MATLAB Mapping Toolbox, via CSV + ogr2ogr.
+if isempty(T) || height(T) == 0
+    return;
+end
+if exist(tmpDir, 'dir') == 7
+    rmdir(tmpDir, 's');
+end
+mkdir(tmpDir);
+[dstDir, dstBase, ~] = fileparts(outShp);
+if exist(dstDir, 'dir') ~= 7
+    mkdir(dstDir);
+end
+csvPath = fullfile(tmpDir, [dstBase '.csv']);
+writetable(T, csvPath);
+
+% Remove existing shapefile component files first.
+parts = {'.shp','.shx','.dbf','.prj','.cpg','.sbn','.sbx','.qix','.fix'};
+for i = 1:numel(parts)
+    f = fullfile(dstDir, [dstBase parts{i}]);
+    if exist(f, 'file') == 2, delete(f); end
+end
+
+shpTmpDir = fullfile(tmpDir, 'shp');
+mkdir(shpTmpDir);
+cmd = sprintf(['ogr2ogr -overwrite -f "ESRI Shapefile" "%s" "%s" ', ...
+               '-nln "%s" -oo X_POSSIBLE_NAMES=X -oo Y_POSSIBLE_NAMES=Y -oo KEEP_GEOM_COLUMNS=YES'], ...
+               shpTmpDir, csvPath, dstBase);
+[status, out] = system(cmd);
+if status ~= 0
+    error('ogr2ogr CSV->Shapefile failed:\n%s\nCommand:\n%s', out, cmd);
+end
+
+created = dir(fullfile(shpTmpDir, [dstBase '.*']));
+if isempty(created)
+    % GDAL may have sanitized layer name; copy first shapefile layer if needed.
+    created = dir(fullfile(shpTmpDir, '*.*'));
+end
+for i = 1:numel(created)
+    if ~created(i).isdir
+        copyfile(fullfile(shpTmpDir, created(i).name), fullfile(dstDir, created(i).name), 'f');
+    end
+end
+copyPrj(srcShp, outShp);
+end
+
+function C = makeCoreMask(tileSize, patchSize, corePatchRadius)
+patchGrid = tileSize / patchSize;
+midPatch = ceil(patchGrid / 2);
+patchIdx = (midPatch - corePatchRadius):(midPatch + corePatchRadius);
+r1 = (patchIdx(1)-1) * patchSize + 1;
+r2 = patchIdx(end) * patchSize;
+C = false(tileSize, tileSize);
+C(r1:r2, r1:r2) = true;
+end
+
 function P = blockAny(mask, p)
 [H,W] = size(mask);
 gh = H / p; gw = W / p;
@@ -541,6 +809,10 @@ if isempty(nd0) || ~isfinite(double(nd0))
     nd = fallback;
 else
     nd = double(nd0);
+    % Ignore uninitialized tiny NoData values returned by some RasterInfo/WriteRaster paths.
+    if abs(nd) < 1e-12
+        nd = fallback;
+    end
 end
 end
 
@@ -557,14 +829,28 @@ end
 if exist(fileparts(outPath), 'dir') ~= 7
     mkdir(fileparts(outPath));
 end
-if dataType == 1
-    A = double(A);
-    A(~isfinite(A)) = nodata;
-end
+A = double(A);
+A(~isfinite(A)) = nodata;
 WriteRaster(outPath, A, geoTrans, proj, dataType, outFormat, nodata);
 end
 
-function rows = appendQARow(rows, srcIdx, pointID, x, y, lineID, width, row0, col0, kept, reject, hiddenPixRatio, hiddenPatchCount, hiddenPatchRatio)
+
+function valid = isValidValue(A, nodata, invalidBelow)
+A = double(A);
+valid = isfinite(A) & (A > invalidBelow);
+
+% Exclude meaningful NoData values. Ignore uninitialized tiny values such as
+% 6.9e-310 that should not be treated as a valid NoData sentinel.
+if ~isempty(nodata) && isfinite(double(nodata))
+    nd = double(nodata);
+    if abs(nd) > 1e-12
+        tol = max(1e-6, abs(nd) * 1e-7);
+        valid = valid & (abs(A - nd) > tol);
+    end
+end
+end
+
+function rows = appendQARow(rows, srcIdx, pointID, x, y, lineID, width, row0, col0, kept, reject, hiddenPixRatio, hiddenPatchCount, hiddenPatchRatio, lossPixelRatio, coreLossPixelRatio)
 r.src_idx = srcIdx;
 r.point_id = pointID;
 r.x = x;
@@ -578,6 +864,8 @@ r.reject = char(reject);
 r.hidden_pixel_ratio = hiddenPixRatio;
 r.hidden_patch_count = hiddenPatchCount;
 r.hidden_patch_ratio = hiddenPatchRatio;
+r.loss_pixel_ratio = lossPixelRatio;
+r.core_loss_pixel_ratio = coreLossPixelRatio;
 if isempty(rows), rows = r; else, rows(end+1,1) = r; end
 end
 
@@ -585,13 +873,16 @@ function T = qaRowsToTable(rows)
 if isempty(rows), T = table(); else, T = struct2table(rows); end
 end
 
-function rows = appendManifestRow(rows, pointID, river, demPath, hiddenViewPath, hiddenPixelPath, hidden21Path)
+function rows = appendManifestRow(rows, pointID, river, demPath, hiddenViewPath, hiddenPixelPath, hidden21Path, lossPixelPath, coreMaskPath, coreLossMaskPath)
 r.point_id = pointID;
 r.river = river;
 r.dem_path = demPath;
 r.hidden_mask_path = hiddenViewPath;
 r.hidden_pixel_QA_path = hiddenPixelPath;
 r.hidden_patch21_QA_path = hidden21Path;
+r.loss_mask_pixel_path = lossPixelPath;
+r.core_mask_pixel_path = coreMaskPath;
+r.core_loss_mask_pixel_path = coreLossMaskPath;
 if isempty(rows), rows = r; else, rows(end+1,1) = r; end
 end
 
@@ -599,7 +890,7 @@ function T = manifestRowsToTable(rows)
 if isempty(rows), T = table(); else, T = struct2table(rows); end
 end
 
-function S = appendCandidatePointStruct(S, srcIdx, pointID, x, y, lineID, width, row0, col0, kept, reject, hiddenPixRatio, hiddenPatchCount, hiddenPatchRatio)
+function S = appendCandidatePointStruct(S, srcIdx, pointID, x, y, lineID, width, row0, col0, kept, reject, hiddenPixRatio, hiddenPatchCount, hiddenPatchRatio, lossPixelRatio, coreLossPixelRatio)
 r.Geometry = 'Point';
 r.X = x; r.Y = y;
 r.SrcID = safeInt(srcIdx, 0);
@@ -614,10 +905,12 @@ r.Col0 = safeNum(col0, -9999);
 r.HPixR = safeNum(hiddenPixRatio, -9999);
 r.HidPN = safeNum(hiddenPatchCount, -9999);
 r.HidPR = safeNum(hiddenPatchRatio, -9999);
+r.LPixR = safeNum(lossPixelRatio, -9999);
+r.CLossPixR = safeNum(coreLossPixelRatio, -9999);
 if isempty(S), S = r; else, S(end+1,1) = r; end
 end
 
-function S = appendPointStruct(S, pointID, srcIdx, x, y, lineID, width, row0, col0, hiddenPixRatio, hiddenPatchCount, hiddenPatchRatio)
+function S = appendPointStruct(S, pointID, srcIdx, x, y, lineID, width, row0, col0, hiddenPixRatio, hiddenPatchCount, hiddenPatchRatio, lossPixelRatio, coreLossPixelRatio)
 r.Geometry = 'Point';
 r.X = x; r.Y = y;
 r.PointID = pointID;
@@ -629,6 +922,8 @@ r.Col0 = col0;
 r.HPixR = safeNum(hiddenPixRatio, -9999);
 r.HidPN = safeNum(hiddenPatchCount, -9999);
 r.HidPR = safeNum(hiddenPatchRatio, -9999);
+r.LPixR = safeNum(lossPixelRatio, -9999);
+r.CLossPixR = safeNum(coreLossPixelRatio, -9999);
 if isempty(S), S = r; else, S(end+1,1) = r; end
 end
 

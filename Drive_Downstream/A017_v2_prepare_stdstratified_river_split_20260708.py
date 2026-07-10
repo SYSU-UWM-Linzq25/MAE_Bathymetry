@@ -137,6 +137,15 @@ def main() -> None:
     ap.add_argument("--bin_stat", choices=["median", "mean"], default="median")
     ap.add_argument("--val_per_bin", type=int, default=1)
     ap.add_argument("--seed", type=int, default=42)
+    ap.add_argument(
+        "--val_rivers",
+        nargs="*",
+        default=None,
+        help=(
+            "Optional manual validation river list. If provided, these whole rivers "
+            "are used as validation and val_per_bin random selection is skipped."
+        ),
+    )
     args = ap.parse_args()
 
     tile_root = Path(args.tile_root)
@@ -217,16 +226,24 @@ def main() -> None:
         else:
             r["std_bin"] = "high"
 
-    rng = random.Random(args.seed)
-    val_rivers = set()
-    for bin_name in ["low", "mid", "high"]:
-        group = [r["river"] for r in river_rows if r["std_bin"] == bin_name]
-        group_sorted = sorted(group)
-        rng.shuffle(group_sorted)
-        take = min(max(args.val_per_bin, 1), max(len(group_sorted) - 1, 1))
-        val_rivers.update(group_sorted[:take])
+    all_rivers = {r["river"] for r in river_rows}
+    if args.val_rivers:
+        val_rivers = set(args.val_rivers)
+        missing = sorted(val_rivers - all_rivers)
+        if missing:
+            raise RuntimeError(f"Manual --val_rivers not found in tile set: {missing}")
+        split_mode = "manual_val_rivers"
+    else:
+        rng = random.Random(args.seed)
+        val_rivers = set()
+        for bin_name in ["low", "mid", "high"]:
+            group = [r["river"] for r in river_rows if r["std_bin"] == bin_name]
+            group_sorted = sorted(group)
+            rng.shuffle(group_sorted)
+            take = min(max(args.val_per_bin, 1), max(len(group_sorted) - 1, 1))
+            val_rivers.update(group_sorted[:take])
+        split_mode = "random_val_per_bin"
 
-    # Ensure train remains non-empty in every bin when possible.
     for r in river_rows:
         r["split"] = "val" if r["river"] in val_rivers else "train"
 
@@ -262,8 +279,10 @@ def main() -> None:
     summary.append(f"n_val_tiles={len(val_rows)}")
     summary.append(f"std_scale={args.std_scale}")
     summary.append(f"bin_stat={args.bin_stat}")
+    summary.append(f"split_mode={split_mode}")
     summary.append(f"val_per_bin={args.val_per_bin}")
     summary.append(f"seed={args.seed}")
+    summary.append(f"manual_val_rivers={' '.join(args.val_rivers) if args.val_rivers else ''}")
     summary.append("")
     summary.append("Rivers:")
     for r in river_rows:
