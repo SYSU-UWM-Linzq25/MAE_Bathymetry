@@ -22,6 +22,9 @@ Output files:
   visuals_worst_by_<rank_metric>/
   visuals_median_by_<rank_metric>/
   visuals_best_by_<rank_metric>/
+    quicklook_core_and_full_loss_pixels.png
+    overlay_input_bathy_hidden_mask.png
+    overlay_input_bathy_final_loss_mask.png
 """
 from __future__ import annotations
 
@@ -266,6 +269,43 @@ def save_quicklook(
     plt.close(fig)
 
 
+def save_bathy_mask_overlay(
+    out_png: Path,
+    bathy_m: np.ndarray,
+    overlay_mask: np.ndarray,
+    core_box: Tuple[int, int, int, int],
+    title: str,
+    mask_label: str,
+    dpi: int,
+) -> None:
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    from matplotlib.patches import Rectangle
+    import numpy.ma as ma
+
+    out_png.parent.mkdir(parents=True, exist_ok=True)
+    bathy = np.asarray(bathy_m, dtype=np.float64)
+    mask = np.asarray(overlay_mask, dtype=bool)
+    bathy_plot = bathy.copy()
+    bathy_plot[~np.isfinite(bathy_plot)] = np.nan
+    vmin, vmax = robust_limits(bathy_plot)
+
+    fig, ax = plt.subplots(1, 1, figsize=(8.2, 7.2))
+    im = ax.imshow(bathy_plot, vmin=vmin, vmax=vmax)
+    cb = fig.colorbar(im, ax=ax, fraction=0.046, pad=0.03)
+    cb.set_label("Elevation / bathymetry (m)")
+    overlay = ma.masked_where(~mask, np.ones_like(mask, dtype=float))
+    ax.imshow(overlay, alpha=0.38, vmin=0, vmax=1)
+    x0, y0, x1, y1 = core_box
+    ax.add_patch(Rectangle((x0 - 0.5, y0 - 0.5), x1 - x0, y1 - y0, fill=False, linewidth=2.0, linestyle="--"))
+    ax.set_title(f"{title}\nOverlay: {mask_label} | overlay pixels={int(mask.sum())}", fontsize=10)
+    ax.axis("off")
+    fig.tight_layout()
+    fig.savefig(out_png, dpi=dpi)
+    plt.close(fig)
+
+
 @torch.no_grad()
 def render_selected_visuals(
     model,
@@ -356,6 +396,8 @@ def render_selected_visuals(
             f"full loss RMSE={full_stats['rmse']:.3f} m | "
             f"std_safe={std_safe:.3f} m"
         )
+        core_box = core_bounds(gt_m.shape[0], gt_m.shape[1], patch_size, args.core_patch_radius)
+
         save_quicklook(
             sample_dir / "quicklook_core_and_full_loss_pixels.png",
             gt_m=gt_m,
@@ -365,8 +407,27 @@ def render_selected_visuals(
             full_loss_mask=full_loss_pix,
             visible_input_mask=visible_input_pix,
             valid_pixel_mask=valid_np,
-            core_box=core_bounds(gt_m.shape[0], gt_m.shape[1], patch_size, args.core_patch_radius),
+            core_box=core_box,
             title=title,
+            dpi=args.vis_dpi,
+        )
+
+        save_bathy_mask_overlay(
+            sample_dir / "overlay_input_bathy_hidden_mask.png",
+            bathy_m=gt_m,
+            overlay_mask=hidden_np,
+            core_box=core_box,
+            title=f"{tile_name} | input bathy + Hidden_Mask",
+            mask_label="Hidden_Mask (model cannot see)",
+            dpi=args.vis_dpi,
+        )
+        save_bathy_mask_overlay(
+            sample_dir / "overlay_input_bathy_final_loss_mask.png",
+            bathy_m=gt_m,
+            overlay_mask=full_loss_pix,
+            core_box=core_box,
+            title=f"{tile_name} | input bathy + final Loss_Mask_Pixel",
+            mask_label="Final loss pixels, bathy-valid, prediction-supported",
             dpi=args.vis_dpi,
         )
 
@@ -670,6 +731,7 @@ def main() -> None:
             "rmse_m_core_loss_pixel ≈ rmse_norm_core_loss_pixel * tile_std_safe per tile.",
             "Large train meter RMSE with small normalized loss usually indicates large tile_std_safe in some train rivers/tiles.",
             "Visuals show core loss pixels, full loss pixels, visible input mask, and valid pixel mask.",
+            "Each visualized sample also includes overlay_input_bathy_hidden_mask.png and overlay_input_bathy_final_loss_mask.png for mask QA.",
         ],
     }
     with (out / "summary.json").open("w") as f:
