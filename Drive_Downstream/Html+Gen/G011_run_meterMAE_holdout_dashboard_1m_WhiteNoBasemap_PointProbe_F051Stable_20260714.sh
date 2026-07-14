@@ -1,34 +1,29 @@
 #!/usr/bin/env bash
-#SBATCH -J G011_meter_html_locator
+#SBATCH -J G011_meter_f051stable
 #SBATCH -p HydroIntel
 #SBATCH -N 1
 #SBATCH -n 1
 #SBATCH -c 12
 #SBATCH --mem=128G
 #SBATCH -t 3-00:00:00
+#SBATCH -o /tank/data/SFS/xinyis/data/bathymetry/MAE-Topography/Downstream_Task_Bathy/cross_validation_v4_meterMAE_BaselineEval/logs/G011_meter_f051stable_%j.out
+#SBATCH -e /tank/data/SFS/xinyis/data/bathymetry/MAE-Topography/Downstream_Task_Bathy/cross_validation_v4_meterMAE_BaselineEval/logs/G011_meter_f051stable_%j.err
 #SBATCH --chdir=/tank/data/SFS/xinyis/data/bathymetry/MAE-Topography
 
 set -euo pipefail
 
-MODEL_CV_ROOT=${MODEL_CV_ROOT:-/tank/data/SFS/xinyis/data/bathymetry/MAE-Topography/Downstream_Task_Bathy/cross_validation_v4_meterMAE_BaselineEval}
-RUNTIME_LOG_DIR="$MODEL_CV_ROOT/logs"
-mkdir -p "$RUNTIME_LOG_DIR"
-RUNTIME_JOB_ID=${SLURM_JOB_ID:-local_$$}
-exec >"$RUNTIME_LOG_DIR/G011_meter_html_locator_${RUNTIME_JOB_ID}.out" \
-     2>"$RUNTIME_LOG_DIR/G011_meter_html_locator_${RUNTIME_JOB_ID}.err"
-
 ROOT=${ROOT:-/tank/data/SFS/xinyis/data/bathymetry/MAE-Topography}
 WORK=${WORK:-$ROOT/Downstream_Task_Bathy}
-SCRIPT=${SCRIPT:-$WORK/script/G010_build_meterMAE_holdout_dashboard_1m_WhiteNoBasemap_PointProbe_RiverLocator_20260713.py}
+SCRIPT=${SCRIPT:-$WORK/script/G010_build_meterMAE_holdout_dashboard_1m_WhiteNoBasemap_PointProbe_F051Stable_20260714.py}
 
 PRED_ROOT=${PRED_ROOT:-/tank/data/SFS/xinyis/data/bathymetry/Processed_Results/FullRiver_Predictions_F060_TileAvgVRT_D003MeterMAE_BaselineEval_D001NoDataSafe}
 ERROR_ROOT=${ERROR_ROOT:-/tank/data/SFS/xinyis/data/bathymetry/Processed_Results/FullRiver_GT_Error_F062_UniquePixel_D003MeterMAE_BaselineEval_D001NoDataSafe}
 TILE_ROOT=${TILE_ROOT:-/tank/data/SFS/xinyis/data/bathymetry/Processed_Results/Tiles_for_MAE_FullRiver_E001/Tiles_1m}
 TILE_RES=${TILE_RES:-1m}
 
-OUT_DIR=${OUT_DIR:-/tank/data/SFS/xinyis/data/bathymetry/Processed_Results/FullRiver_WebMap_G010_MeterMAE_Holdout_1m_WhiteNoBasemap_Probe_RiverLocator}
-OUT_HTML=${OUT_HTML:-G010_meterMAE_dashboard_1m_white_probe_river_locator.html}
-ZIP_NAME=${ZIP_NAME:-G010_meterMAE_dashboard_1m_white_probe_river_locator_package.zip}
+OUT_DIR=${OUT_DIR:-/tank/data/SFS/xinyis/data/bathymetry/Processed_Results/FullRiver_WebMap_G010_MeterMAE_Holdout_1m_WhiteNoBasemap_Probe_F051Stable}
+OUT_HTML=${OUT_HTML:-G010_meterMAE_dashboard_1m_white_probe_F051Stable.html}
+ZIP_NAME=${ZIP_NAME:-G010_meterMAE_dashboard_1m_white_probe_F051Stable_package.zip}
 
 # DISPLAY ONLY:
 # DETAIL_RES_M controls the intermediate EPSG:3857 display grid.
@@ -74,7 +69,7 @@ export MKL_NUM_THREADS=${SLURM_CPUS_PER_TASK:-12}
 export GDAL_NUM_THREADS=${SLURM_CPUS_PER_TASK:-12}
 export CPL_VSIL_CURL_ALLOWED_EXTENSIONS=.tif,.tiff,.vrt
 
-mkdir -p "$MODEL_CV_ROOT/logs"
+mkdir -p "$WORK/cross_validation_v4_meterMAE_BaselineEval/logs"
 
 for path in "$SCRIPT" "$PRED_ROOT" "$ERROR_ROOT" "$TILE_ROOT"; do
   if [[ ! -e "$path" ]]; then
@@ -142,7 +137,7 @@ if [[ -n "${RIVERS:-}" ]]; then
 fi
 
 echo "============================================================"
-echo "G011 v4 meter-MAE 1 m dashboard with basemap-below panes, point probe, and river locator"
+echo "G011 meter-MAE dashboard copied from the known-successful F051/F052 implementation"
 echo "TILER=1 m intermediate display grid + finest XYZ color/probe tiles + parent PNG pyramid"
 echo "LOW_ZOOM_DIRECT_GDAL_WARP=NO"
 echo "GDALWARP_DIRECT_PNG=NO"
@@ -151,7 +146,7 @@ echo "CRS_VALIDATION=stop if transformed holdout bounds are outside CONUS"
 echo "BROWSER_LAUNCHER=OPEN_DASHBOARD.bat included in ZIP"
 echo "BASEMAP_ORDER=basemap pane below MAE raster pane"
 echo "POINT_PROBE=enabled; finest XYZ display-grid values"
-echo "RIVER_LOCATOR=Fit current river flashes labelled magenta/yellow extent box for 6 seconds"
+echo "RIVER_LOCATOR=disabled; browser logic copied directly from successful F051"
 echo "NO_BASEMAP_BACKGROUND=white"
 echo "GDAL2TILES_REQUIRED=NO"
 echo "GDAL_CALC_REQUIRED=NO"
@@ -179,7 +174,7 @@ echo "OVERWRITE=$OVERWRITE"
 echo "KEEP_INTERMEDIATE=$KEEP_INTERMEDIATE"
 echo "MAKE_ZIP=$MAKE_ZIP"
 echo "NOTICE=Display-only reprojection/resampling; original F060/F062 rasters unchanged"
-echo "METRICS=Read from native-resolution F020 summary; not recomputed from display tiles"
+echo "METRICS=Read from F062 unique-geospatial summary; not recomputed from display tiles"
 echo "============================================================"
 
 python -u "$SCRIPT" "${ARGS[@]}"

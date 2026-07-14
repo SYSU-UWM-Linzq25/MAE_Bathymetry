@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""G010: build a high-detail Leaflet dashboard for the v4 meter-MAE holdouts.
+"""G010: meter-MAE dashboard copied from the known-successful F051 implementation.
 
 Why this version exists
 -----------------------
@@ -20,9 +20,9 @@ ZIP, extract it, and open the HTML.
 Included experiment/layer structure
 -----------------------------------
 Experiments (allowlisted by default):
-  - holdout_CA_D001NoDataSafe
-  - holdout_CO_D001NoDataSafe
-  - holdout_Santiam_D001NoDataSafe
+  - holdout_CA_D003MeterMAE_BaselineEval_D001NoDataSafe
+  - holdout_CO_D003MeterMAE_BaselineEval_D001NoDataSafe
+  - holdout_Santiam_D003MeterMAE_BaselineEval_D001NoDataSafe
 
 For each experiment/river:
   - Prediction and GT, with one shared elevation scale
@@ -93,10 +93,10 @@ DEFAULT_TILE_ROOT = Path(
 )
 DEFAULT_OUT_DIR = Path(
     "/tank/data/SFS/xinyis/data/bathymetry/Processed_Results/"
-    "FullRiver_WebMap_G010_MeterMAE_Holdout_1m_WhiteNoBasemap_Probe_RiverLocator"
+    "FullRiver_WebMap_G010_MeterMAE_Holdout_1m_WhiteNoBasemap_Probe_F051Stable"
 )
-DEFAULT_HTML_NAME = "G010_meterMAE_dashboard_1m_white_probe_river_locator.html"
-DEFAULT_ZIP_NAME = "G010_meterMAE_dashboard_1m_white_probe_river_locator_package.zip"
+DEFAULT_HTML_NAME = "G010_meterMAE_dashboard_1m_white_probe_F051Stable.html"
+DEFAULT_ZIP_NAME = "G010_meterMAE_dashboard_1m_white_probe_F051Stable_package.zip"
 DEFAULT_EXPERIMENTS = (
     "holdout_CA_D003MeterMAE_BaselineEval_D001NoDataSafe",
     "holdout_CO_D003MeterMAE_BaselineEval_D001NoDataSafe",
@@ -141,7 +141,7 @@ class RiverSources:
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
-        description="Create a high-detail Leaflet package for v4 meter-MAE holdout full-river results.",
+        description="Create the meter-MAE holdout dashboard using the known-successful F051 web-map implementation.",
     )
     p.add_argument("--pred_root", type=Path, default=DEFAULT_PRED_ROOT)
     p.add_argument("--error_root", type=Path, default=DEFAULT_ERROR_ROOT)
@@ -435,7 +435,7 @@ def gdal_info(path: Path) -> RasterInfo:
 
 
 def resolve_authoritative_source_srs(tile_path: Path) -> Tuple[str, str]:
-    """Read the river CRS from an actual E001 GeoTIFF, not the manual F060 VRT.
+    """Read the river CRS from an actual E001 GeoTIFF, not the manual F010 VRT.
 
     F060/F062 VRTs were written manually and may omit <SRS>. Their coordinates
     are still in the original projected grid. An E001 bathymetry GeoTIFF carries
@@ -1208,13 +1208,7 @@ def first_metric(flat: Dict[str, Any], exact_suffixes: Sequence[str], contains: 
 
 
 def extract_metrics(summary: Dict[str, Any]) -> Dict[str, Any]:
-    """Prefer F062 exact unique-geospatial full-river metrics.
-
-    F062 also retains legacy tile-footprint-weighted metrics for comparison with
-    the old F020 convention. The HTML headline metrics intentionally use the
-    unique-geospatial fields so each final overlap-averaged river pixel is
-    counted once.
-    """
+    """Read F062 unique-geospatial full-river metrics for the HTML headline."""
     flat = flatten_json(summary)
     return {
         "n_pixels": first_metric(
@@ -1602,7 +1596,7 @@ def html_template(records: List[Dict[str, Any]], manifest: Dict[str, Any], defau
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width,initial-scale=1" />
-<title>Meter-MAE Full-River 1 m Dashboard with Point Probe and River Locator</title>
+<title>Meter-MAE Full-River 1 m Dashboard with Point Probe</title>
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/leaflet@1.9.4/dist/leaflet.css" />
 <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.css" />
@@ -1667,17 +1661,6 @@ font-size:15px;line-height:1.55;color:#5f1712;box-shadow:0 6px 30px rgba(0,0,0,.
 .probe-crosshair:before {{ left:10px;top:0;width:2px;height:22px; }}
 .probe-crosshair:after {{ left:0;top:10px;width:22px;height:2px; }}
 .probe-crosshair span {{ position:absolute;left:7px;top:7px;width:8px;height:8px;border:2px solid #fff;border-radius:50%;background:#ff2d20; }}
-@keyframes riverExtentPulse {{
-  0%,100% {{ stroke:#ff006e;stroke-width:6;stroke-opacity:1; }}
-  50% {{ stroke:#ffd400;stroke-width:9;stroke-opacity:.82; }}
-}}
-.river-fit-box {{ animation:riverExtentPulse .75s ease-in-out 0s 8; }}
-.river-fit-label {{
-  background:#ff006e !important;color:#fff !important;border:2px solid #fff !important;
-  border-radius:5px !important;box-shadow:0 2px 10px rgba(0,0,0,.45) !important;
-  font-size:12px !important;font-weight:800 !important;padding:5px 8px !important;
-}}
-.river-fit-label:before {{ display:none !important; }}
 .leaflet-container {{ font-family:Arial,Helvetica,sans-serif; }}
 .leaflet-tile-pane img {{ image-rendering:auto; }}
 .pixelated .leaflet-overlay-pane img,.pixelated .leaflet-tile-pane img {{ image-rendering:pixelated;image-rendering:crisp-edges; }}
@@ -1695,18 +1678,18 @@ font-size:15px;line-height:1.55;color:#5f1712;box-shadow:0 6px 30px rgba(0,0,0,.
 </div>
 <header>
 <section>
-  <div class="title">Meter-MAE Full-River 1 m Dashboard + Point Probe + River Locator</div>
+  <div class="title">Meter-MAE Full-River 1 m Dashboard + Point Probe</div>
   <div class="controls">
     <div><label>Experiment</label><select id="experimentSelect"></select></div>
     <div><label>River</label><select id="riverSelect"></select></div>
     <div><label>Basemap</label><select id="basemapSelect"><option value="satellite">Satellite imagery</option><option value="light">Light gray map</option><option value="none">No basemap · white background</option></select></div>
     <div><label>Raster opacity <span id="opacityValue"></span></label><input id="opacitySlider" type="range" min="0" max="1" step="0.02" value="{max(0.0,min(1.0,default_opacity)):.2f}" /></div>
-    <div><button id="fitBtn">Fit current river + show extent</button></div>
+    <div><button id="fitBtn">Fit current river</button></div>
     <div><button id="nativeBtn">Display-detail zoom</button></div>
     <div><button id="clearProbeBtn">Clear point probe</button></div>
   </div>
   <div class="tabs"><button class="tabBtn active" data-tab="compareView">Prediction + GT</button><button class="tabBtn" data-tab="errorView">Error</button><button class="tabBtn" data-tab="inputView">Input Tile + Masks</button></div>
-  <div class="help">Maps in the current tab stay synchronized. “Fit current river” flashes a bold magenta/yellow extent box for 6 seconds so the narrow river result is easy to locate. Click any map to place a linked crosshair and read numeric Prediction, GT, Error, input bathymetry, Hidden Mask, and Loss Mask values. Local MAE overlays work offline; satellite/light-gray basemaps require Internet.</div>
+  <div class="help">Maps in the current tab stay synchronized. Click any map to place a linked crosshair and read numeric Prediction, GT, Error, input bathymetry, Hidden Mask, and Loss Mask values. Local MAE overlays work offline; satellite/light-gray basemaps require Internet.</div>
 </section>
 <section class="summary">
   <div class="metrics">
@@ -1780,11 +1763,10 @@ function createDashboardMap(id){{
   m.createPane('basemapPane');m.getPane('basemapPane').style.zIndex=200;m.getPane('basemapPane').style.pointerEvents='none';
   m.createPane('rasterPane');m.getPane('rasterPane').style.zIndex=400;m.getPane('rasterPane').style.pointerEvents='none';
   m.createPane('probePane');m.getPane('probePane').style.zIndex=650;m.getPane('probePane').style.pointerEvents='none';
-  m.createPane('locatorPane');m.getPane('locatorPane').style.zIndex=700;m.getPane('locatorPane').style.pointerEvents='none';
   return m;
 }}
 const maps=Object.fromEntries(mapIds.map(id=>[id,createDashboardMap(id)]));
-const layerState=Object.fromEntries(mapIds.map(id=>[id,{{base:null,overlay:null,probe:null,locator:null}}]));
+const layerState=Object.fromEntries(mapIds.map(id=>[id,{{base:null,overlay:null,probe:null}}]));
 
 function satelliteLayer(){{return L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{{z}}/{{y}}/{{x}}',{{pane:'basemapPane',maxZoom:20,attribution:'Tiles &copy; Esri'}});}}
 function lightLayer(){{return L.tileLayer('https://{{s}}.basemaps.cartocdn.com/light_all/{{z}}/{{x}}/{{y}}{{r}}.png',{{pane:'basemapPane',subdomains:'abcd',maxZoom:20,attribution:'&copy; OpenStreetMap contributors &copy; CARTO'}});}}
@@ -1797,56 +1779,7 @@ function setOpacity(){{const v=Number(opacitySlider.value);opacityValue.textCont
 function syncGroup(ids){{ids.forEach(id=>{{maps[id].on('move zoom',()=>{{if(syncing)return;syncing=true;const c=maps[id].getCenter(),z=maps[id].getZoom();ids.forEach(other=>{{if(other!==id)maps[other].setView(c,z,{{animate:false,reset:false}});}});syncing=false;updateBadges();}});}});}}
 syncGroup(['predMap','gtMap']);syncGroup(['inputMap','hiddenMap','lossMap']);
 function activeMapIds(){{return activeTab==='compareView'?['predMap','gtMap']:(activeTab==='errorView'?['errorMap']:['inputMap','hiddenMap','lossMap']);}}
-let riverLocatorTimer=null;
-function clearRiverLocator(){{
-  if(riverLocatorTimer){{clearTimeout(riverLocatorTimer);riverLocatorTimer=null;}}
-  Object.entries(maps).forEach(([id,m])=>{{
-    if(layerState[id].locator){{
-      m.removeLayer(layerState[id].locator);
-      layerState[id].locator=null;
-    }}
-  }});
-}}
-function showRiverLocator(ids){{
-  if(!currentRecord)return;
-  clearRiverLocator();
-  ids.forEach(id=>{{
-    const m=maps[id];
-    const box=L.rectangle(currentRecord.bounds,{{
-      pane:'locatorPane',
-      color:'#ff006e',
-      weight:6,
-      opacity:1,
-      dashArray:'16 9',
-      lineCap:'square',
-      fill:true,
-      fillColor:'#ffd400',
-      fillOpacity:0.045,
-      interactive:false,
-      className:'river-fit-box'
-    }}).addTo(m);
-    box.bindTooltip('Current river result extent',{{
-      permanent:true,
-      direction:'center',
-      className:'river-fit-label',
-      opacity:1,
-      pane:'locatorPane',
-      interactive:false
-    }}).openTooltip();
-    if(box.bringToFront)box.bringToFront();
-    layerState[id].locator=box;
-  }});
-  riverLocatorTimer=setTimeout(clearRiverLocator,6000);
-}}
-function fitActive(showLocator=false){{
-  if(!currentRecord)return;
-  const ids=activeMapIds();
-  ids.forEach(id=>maps[id].fitBounds(currentRecord.bounds,{{padding:[28,28],animate:false}}));
-  setTimeout(()=>{{
-    ids.forEach(id=>maps[id].invalidateSize());
-    if(showLocator)showRiverLocator(ids);
-  }},80);
-}}
+function fitActive(){{if(!currentRecord)return;activeMapIds().forEach(id=>maps[id].fitBounds(currentRecord.bounds,{{padding:[18,18],animate:false}}));setTimeout(()=>activeMapIds().forEach(id=>maps[id].invalidateSize()),20);}}
 function nativeZoom(){{if(!currentRecord)return;const ids=activeMapIds();const center=maps[ids[0]].getCenter();ids.forEach(id=>maps[id].setView(center,currentRecord.max_zoom,{{animate:false}}));}}
 function updateBadges(){{if(!currentRecord)return;const text=`GRID ${{currentRecord.detail_res_m}} m · XYZ finest ${{fmt(currentRecord.xyz_finest_res_m,3)}} m · resampled · z${{currentRecord.max_zoom}}`;document.getElementById('predBadge').textContent=text;document.getElementById('gtBadge').textContent=text;document.getElementById('errorBadge').textContent=text;document.getElementById('inputBadge').textContent=text;}}
 
@@ -1949,11 +1882,11 @@ function populateRivers(){{const exp=experimentSelect.value;const old=riverSelec
 function fmt(x,d=3){{return x===null||x===undefined||!Number.isFinite(Number(x))?'—':Number(x).toFixed(d);}}
 function fmtInt(x){{return x===null||x===undefined||!Number.isFinite(Number(x))?'—':Math.round(Number(x)).toLocaleString();}}
 function setGradient(id,colors){{document.getElementById(id).style.background='linear-gradient(to right,'+colors.join(',')+')';}}
-function loadCurrent(){{clearRiverLocator();const r=byKey[`${{experimentSelect.value}}::${{riverSelect.value}}`];if(!r)return;clearProbe();currentRecord=r;installAllOverlays();Object.values(maps).forEach(m=>{{m.setMinZoom(r.min_zoom);m.setMaxZoom(r.max_zoom+2);m.fitBounds(r.bounds,{{padding:[18,18],animate:false}});setTimeout(()=>m.invalidateSize(),25);}});document.getElementById('metricN').textContent=fmtInt(r.metrics.n_pixels);document.getElementById('metricRMSE').textContent=fmt(r.metrics.rmse_m);document.getElementById('metricMAE').textContent=fmt(r.metrics.mae_m);document.getElementById('metricBias').textContent=fmt(r.metrics.bias_m);document.getElementById('elevRange').textContent=`${{fmt(r.elev_min,2)}} to ${{fmt(r.elev_max,2)}}`;document.getElementById('inputRange').textContent=`${{fmt(r.input_elev_min,2)}} to ${{fmt(r.input_elev_max,2)}}`;document.getElementById('errorRange').textContent=errorMode==='error'?`${{fmt(-r.error_max,2)}} to ${{fmt(r.error_max,2)}}`:`0 to ${{fmt(r.error_max,2)}}`;document.getElementById('errorScaleTitle').textContent=errorMode==='error'?`Signed error: ${{r.error_definition}} (m)`:'Absolute error (m)';setGradient('elevGradient',r.elev_colors);setGradient('inputGradient',r.input_colors);setGradient('errorGradient',errorMode==='error'?r.error_colors:r.abs_error_colors);document.getElementById('hiddenTitle').textContent=`Hidden Mask · mean hidden fraction ${{fmt(r.input_stats.hidden_fraction,3)}}`;document.getElementById('lossTitle').textContent=`Loss Mask Pixel · mean included fraction ${{fmt(r.input_stats.loss_fraction,3)}}`;const total=Object.values(r.tile_counts).reduce((a,b)=>a+b,0);const probeTotal=Object.values(r.probe_counts||{{}}).reduce((a,b)=>a+b,0);document.getElementById('status').textContent=`${{r.experiment}} → ${{r.river}} · E001 tiles ${{r.input_stats.n_tiles.toLocaleString()}} · display grid ${{r.source.target_width.toLocaleString()}}×${{r.source.target_height.toLocaleString()}} at ${{r.detail_res_m}} m in EPSG:3857 (resampled) · source CRS ${{r.source.source_crs || "—"}} · display PNG tiles ${{total.toLocaleString()}} · probe PNG tiles ${{probeTotal.toLocaleString()}}`;updateBadges();}}
+function loadCurrent(){{const r=byKey[`${{experimentSelect.value}}::${{riverSelect.value}}`];if(!r)return;clearProbe();currentRecord=r;installAllOverlays();Object.values(maps).forEach(m=>{{m.setMinZoom(r.min_zoom);m.setMaxZoom(r.max_zoom+2);m.fitBounds(r.bounds,{{padding:[18,18],animate:false}});setTimeout(()=>m.invalidateSize(),25);}});document.getElementById('metricN').textContent=fmtInt(r.metrics.n_pixels);document.getElementById('metricRMSE').textContent=fmt(r.metrics.rmse_m);document.getElementById('metricMAE').textContent=fmt(r.metrics.mae_m);document.getElementById('metricBias').textContent=fmt(r.metrics.bias_m);document.getElementById('elevRange').textContent=`${{fmt(r.elev_min,2)}} to ${{fmt(r.elev_max,2)}}`;document.getElementById('inputRange').textContent=`${{fmt(r.input_elev_min,2)}} to ${{fmt(r.input_elev_max,2)}}`;document.getElementById('errorRange').textContent=errorMode==='error'?`${{fmt(-r.error_max,2)}} to ${{fmt(r.error_max,2)}}`:`0 to ${{fmt(r.error_max,2)}}`;document.getElementById('errorScaleTitle').textContent=errorMode==='error'?`Signed error: ${{r.error_definition}} (m)`:'Absolute error (m)';setGradient('elevGradient',r.elev_colors);setGradient('inputGradient',r.input_colors);setGradient('errorGradient',errorMode==='error'?r.error_colors:r.abs_error_colors);document.getElementById('hiddenTitle').textContent=`Hidden Mask · mean hidden fraction ${{fmt(r.input_stats.hidden_fraction,3)}}`;document.getElementById('lossTitle').textContent=`Loss Mask Pixel · mean included fraction ${{fmt(r.input_stats.loss_fraction,3)}}`;const total=Object.values(r.tile_counts).reduce((a,b)=>a+b,0);const probeTotal=Object.values(r.probe_counts||{{}}).reduce((a,b)=>a+b,0);document.getElementById('status').textContent=`${{r.experiment}} → ${{r.river}} · E001 tiles ${{r.input_stats.n_tiles.toLocaleString()}} · display grid ${{r.source.target_width.toLocaleString()}}×${{r.source.target_height.toLocaleString()}} at ${{r.detail_res_m}} m in EPSG:3857 (resampled) · source CRS ${{r.source.source_crs || "—"}} · display PNG tiles ${{total.toLocaleString()}} · probe PNG tiles ${{probeTotal.toLocaleString()}}`;updateBadges();}}
 function updateError(){{if(!currentRecord)return;installOverlay('errorMap',errorMode);document.getElementById('errorTitle').textContent=errorMode==='error'?`Signed Error (${{currentRecord.error_definition}})`:'Absolute Error';document.getElementById('errorRange').textContent=errorMode==='error'?`${{fmt(-currentRecord.error_max,2)}} to ${{fmt(currentRecord.error_max,2)}}`:`0 to ${{fmt(currentRecord.error_max,2)}}`;document.getElementById('errorScaleTitle').textContent=errorMode==='error'?`Signed error: ${{currentRecord.error_definition}} (m)`:'Absolute error (m)';setGradient('errorGradient',errorMode==='error'?currentRecord.error_colors:currentRecord.abs_error_colors);}}
 
-experimentSelect.addEventListener('change',populateRivers);riverSelect.addEventListener('change',loadCurrent);document.getElementById('basemapSelect').addEventListener('change',applyBasemap);opacitySlider.addEventListener('input',setOpacity);document.getElementById('fitBtn').addEventListener('click',()=>fitActive(true));document.getElementById('nativeBtn').addEventListener('click',nativeZoom);document.getElementById('clearProbeBtn').addEventListener('click',clearProbe);document.getElementById('errorFitBtn').addEventListener('click',()=>{{if(!currentRecord)return;maps.errorMap.fitBounds(currentRecord.bounds,{{padding:[28,28],animate:false}});setTimeout(()=>showRiverLocator(['errorMap']),80);}});document.getElementById('errorMode').addEventListener('change',e=>{{errorMode=e.target.value;updateError();}});
-document.querySelectorAll('.tabBtn').forEach(btn=>btn.addEventListener('click',()=>{{activeTab=btn.dataset.tab;document.querySelectorAll('.tabBtn').forEach(x=>x.classList.toggle('active',x===btn));document.querySelectorAll('.view').forEach(x=>x.classList.toggle('active',x.id===activeTab));setTimeout(()=>{{activeMapIds().forEach(id=>maps[id].invalidateSize());fitActive(false);}},30);}}));
+experimentSelect.addEventListener('change',populateRivers);riverSelect.addEventListener('change',loadCurrent);document.getElementById('basemapSelect').addEventListener('change',applyBasemap);opacitySlider.addEventListener('input',setOpacity);document.getElementById('fitBtn').addEventListener('click',fitActive);document.getElementById('nativeBtn').addEventListener('click',nativeZoom);document.getElementById('clearProbeBtn').addEventListener('click',clearProbe);document.getElementById('errorFitBtn').addEventListener('click',()=>maps.errorMap.fitBounds(currentRecord.bounds,{{padding:[18,18]}}));document.getElementById('errorMode').addEventListener('change',e=>{{errorMode=e.target.value;updateError();}});
+document.querySelectorAll('.tabBtn').forEach(btn=>btn.addEventListener('click',()=>{{activeTab=btn.dataset.tab;document.querySelectorAll('.tabBtn').forEach(x=>x.classList.toggle('active',x===btn));document.querySelectorAll('.view').forEach(x=>x.classList.toggle('active',x.id===activeTab));setTimeout(()=>{{activeMapIds().forEach(id=>maps[id].invalidateSize());fitActive();}},30);}}));
 applyBasemap();setOpacity();populateRivers();
 </script>
 </body>
@@ -2025,19 +1958,14 @@ or recompute the original model outputs.
    200). MAE result overlays are placed in a higher raster pane (z-index 400),
    so the basemap cannot cover Prediction, GT, Error, bathymetry, or masks.
 
-8. River locator
-   Clicking Fit current river fits the active map panels and shows a bold,
-   pulsing magenta/yellow rectangle labelled Current river result extent for
-   6 seconds. The rectangle is a browser locator only and does not change data.
-
-9. Point probe
+8. Point probe
    Clicking any map places a synchronized crosshair on all panels. Numeric values
    are read from independently encoded finest-XYZ probe PNGs, not inferred from
    display colors. Continuous values are quantized to {probe_quantization_mm:g} mm.
    The probe reports values from the resampled finest XYZ display grid, not the
    exact native/source raster pixel. Official F062 metrics remain native-resolution.
 
-10. Package size
+9. Package size
    A 1 m intermediate display grid produces substantially more PNG files than
    the previous 4 m package. Generation, ZIP creation, download, and extraction
    will therefore take longer and require more storage.
@@ -2051,7 +1979,7 @@ the extracted folder through localhost and avoids file:// and temporary-ZIP issu
 Archive name:
   {zip_name}
 """
-    (out_dir / "README_G010_meterMAE.txt").write_text(text, encoding="utf-8")
+    (out_dir / "README_G010_meterMAE_F051Stable.txt").write_text(text, encoding="utf-8")
 
 
 
@@ -2158,7 +2086,7 @@ def main() -> None:
     sources, discovery_warnings = discover_sources(args)
 
     print("============================================================")
-    print("G010 v4 meter-MAE holdout dashboard with CRS validation, point probe, and river locator")
+    print("G010 meter-MAE dashboard copied from the known-successful F051 browser-safe implementation")
     print(f"records={len(sources)} detail_res_m={args.detail_res_m} zoom={min_zoom}-{max_zoom}")
     print(f"out_dir={out_dir}")
     print("============================================================")
@@ -2192,12 +2120,6 @@ def main() -> None:
             "basemap_pane_zindex": 200,
             "mae_raster_pane_zindex": 400,
             "point_probe_pane_zindex": 650,
-            "river_locator_pane_zindex": 700,
-        },
-        "river_locator": {
-            "enabled": True,
-            "trigger": "Fit current river button",
-            "display": "pulsing magenta/yellow result-extent rectangle with permanent label for 6 seconds"
         },
         "point_probe": {
             "enabled": True,
@@ -2229,12 +2151,11 @@ def main() -> None:
             "Leaflet is attempted from jsDelivr, unpkg, and cdnjs; a visible error panel replaces a blank page if all fail.",
             "OPEN_DASHBOARD.bat serves the extracted package over localhost.",
             "Each source CRS is read from an authoritative E001 GeoTIFF and validated after transformation to CONUS.",
-            "Headline metrics come from F062 unique_geospatial_* fields, where each final overlap-averaged full-river pixel is counted once; they are not recomputed from display tiles.",
+            "Headline metrics come from F062 unique_geospatial_* fields and are not recomputed from display tiles.",
             "The display overlays are EPSG:3857 resampled visualization products; original F060/F062 rasters are unchanged.",
             "Continuous rasters use bilinear resampling; binary masks use nearest-neighbour resampling.",
             "Robust percentile clipping affects colors only, not raster values or official metrics.",
             "Basemaps are forced below MAE overlays using dedicated Leaflet panes.",
-            "Fit current river displays a pulsing labelled extent rectangle for 6 seconds in a dedicated top locator pane.",
             "Point-probe values are independently encoded and sampled from the finest resampled XYZ display grid.",
         ],
     }
