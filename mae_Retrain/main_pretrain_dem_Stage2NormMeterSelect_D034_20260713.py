@@ -1,0 +1,1584 @@
+"""MAE pre-training for single-channel DEM GeoTIFF tiles.
+
+Compared to the original `main_pretrain.py`, this script:
+1) Reads **1-channel float** DEM tiles from GeoTIFF, not 3-channel JPEG.
+2) Computes **global normalization** from the TRAIN split at start (mean/std or min/max).
+3) Supports pixel-weighted meter-space MAE as the optimization objective.
+4) Runs validation each epoch and can save/select the best checkpoint by meter MAE.
+4) Optionally evaluates the final/best model on TEST (and extra eval dirs) using TRAIN normalization.
+
+Intended data layout (recommended):
+  <DATA_ROOT>/train/**/*.tif
+  <DATA_ROOT>/val/**/*.tif
+  <DATA_ROOT>/test/**/*.tif
+
+You can also provide explicit file lists via --train_list / --val_list / --test_list.
+"""
+
+from __future__ import annotations
+
+import argparse
+import datetime
+import json
+import os
+import time
+import csv
+from pathlib import Path
+from typing import Dict, Optional, List, Any, Tuple
+
+import numpy as np
+import matplotlib.pyplot as plt
+import torch
+import torch.backends.cudnn as cudnn
+try:
+    from torch.utils.tensorboard import SummaryWriter  # type: ignore
+except Exception:  # tensorboard is optional
+    SummaryWriter = None
+
+import util.misc as misc
+from util.misc import NativeScalerWithGradNormCount as NativeScaler
+import models_mae
+from engine_pretrain_Stage2NormMeterSelect_D034_20260713 import train_one_epoch, evaluate_one_epoch
+from util.dem_dataset import DEMTileDataset, DEMLCCPairDataset, DEMDualMaskDataset, compute_dem_stats, load_json, save_json
+
+def _denorm(x: torch.Tensor, meta: dict, args) -> torch.Tensor:
+    """
+    x: [H,W] or [1,H,W] in model space
+    For tile_norm=True:
+        x_m = x * tile_std_safe + tile_mean_m
+    Fallback to old global denorm if tile_norm=False
+    """
+    if getattr(args, "tile_norm", False):
+        if isinstance(meta, dict):
+            tile_mean = meta["tile_mean_m"]
+            tile_std = meta["tile_std_safe"]
+            if torch.is_tensor(tile_mean):
+                tile_mean = tile_mean.item()
+            if torch.is_tensor(tile_std):
+                tile_std = tile_std.item()
+            return x * float(tile_std) + float(tile_mean)
+
+    if args.norm_method == 'meanstd':
+        return x * args.norm_std + args.norm_mean
+    else:
+        vmin = float(args.dem_norm['min'])
+        vmax = float(args.dem_norm['max'])
+        return x * (vmax - vmin) + vmin
+
+def _write_geotiff_like(ref_path: str, out_path: Path, arr2d, dtype: str = "float32", nodata=None):
+    """
+    Write a single-band GeoTIFF using ref_path as template (CRS/transform/tiling, etc.)
+    arr2d: np.ndarray [H,W]
+    """
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+
+    try:
+        import numpy as np
+        import rasterio
+
+        with rasterio.open(ref_path) as src:
+            profile = src.profile.copy()
+
+        # Safety: ensure shape matches
+        h, w = arr2d.shape
+        if profile.get("height", None) != h or profile.get("width", None) != w:
+            # fallback to plain tiff (no georef) if mismatch
+            import tifffile
+            tifffile.imwrite(str(out_path), arr2d.astype(np.float32))
+            return
+
+        profile.update(
+            driver="GTiff",
+            count=1,
+            dtype=dtype,
+            nodata=nodata,
+            compress=profile.get("compress", "LZW"),
+        )
+
+        with rasterio.open(str(out_path), "w", **profile) as dst:
+            dst.write(arr2d, 1)
+
+    except Exception:
+        # fallback: plain TIFF (no georef)
+        import numpy as np
+        import tifffile
+        tifffile.imwrite(str(out_path), arr2d.astype(np.float32))
+
+@torch.no_grad()
+def get_or_make_vis_indices(dataset, n: int, seed: int, save_path: Path) -> np.ndarray:
+    save_path.parent.mkdir(parents=True, exist_ok=True)
+    if save_path.exists():
+        idxs = np.loadtxt(save_path, dtype=int)
+        return np.atleast_1d(idxs)
+
+    rng = np.random.RandomState(seed)
+    n = min(int(n), len(dataset))
+    idxs = rng.choice(len(dataset), size=n, replace=False).astype(int)
+    np.savetxt(save_path, idxs, fmt="%d")
+    return idxs
+
+
+@torch.no_grad()
+def visualize_fixed_tiles_geotiff(model, dataset, idxs: np.ndarray, device, epoch: int, args, out_dir: Path, split_name: str):
+    """
+    Save GeoTIFFs for fixed tiles:
+      - gt_denorm_m
+      - pred_denorm_m (raw decoder output unpatchify)
+      - recon_denorm_m (paste keep from input + pred on masked)
+      - err_m (recon - gt)
+      - mask (1=masked)
+    """
+    import numpy as np
+
+    model.eval()
+    out_epoch = out_dir / "vis_tif" / split_name / f"epoch{epoch:04d}"
+    out_epoch.mkdir(parents=True, exist_ok=True)
+
+    for k, idx in enumerate(idxs.tolist()):
+        sample = dataset[int(idx)]
+
+        lcc_mask = None
+        valid_mask = None
+        if isinstance(sample, (tuple, list)):
+            if len(sample) >= 5:
+                x, meta, ref_path, lcc_mask, valid_mask = sample[:5]
+            elif len(sample) == 4:
+                if torch.is_tensor(sample[2]) and torch.is_tensor(sample[3]):
+                    x, meta, lcc_mask, valid_mask = sample
+                    ref_path = meta["path"] if isinstance(meta, dict) and "path" in meta else dataset.files[int(idx)]
+                else:
+                    x, meta, ref_path, lcc_mask = sample
+            elif len(sample) == 3:
+                if torch.is_tensor(sample[2]):
+                    x, meta, lcc_mask = sample
+                    ref_path = meta["path"] if isinstance(meta, dict) and "path" in meta else dataset.files[int(idx)]
+                else:
+                    x, meta, ref_path = sample
+            elif len(sample) == 2:
+                x, meta = sample
+                ref_path = meta["path"] if isinstance(meta, dict) and "path" in meta else dataset.files[int(idx)]
+            else:
+                x = sample[0]
+                meta = None
+                ref_path = dataset.files[int(idx)]
+        else:
+            x = sample
+            meta = None
+            ref_path = dataset.files[int(idx)]
+
+        x = x.unsqueeze(0).to(device, non_blocking=True)  # [1,1,H,W]
+        if lcc_mask is not None:
+            lcc_mask = lcc_mask.unsqueeze(0).to(device, non_blocking=True)
+        if valid_mask is not None:
+            valid_mask = valid_mask.unsqueeze(0).to(device, non_blocking=True)
+
+        # fixed visualization mask per tile
+        cpu_state = torch.random.get_rng_state()
+        cuda_state = torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None
+
+        vis_seed = int(args.seed + 100000 + int(idx))
+        torch.manual_seed(vis_seed)
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed_all(vis_seed)
+
+        with torch.cuda.amp.autocast(enabled=getattr(args, "amp", True)):
+            if lcc_mask is not None:
+                _, pred, mask, prediction_mask = model(
+                    x, mask_ratio=args.mask_ratio,
+                    lcc_mask=lcc_mask,
+                    valid_mask=valid_mask,
+                    loss_on_lcc_only=getattr(args, "loss_on_lcc_only", False),
+                    lcc_priority=getattr(args, "lcc_priority", 10.0),
+                    lcc_mask_mode=getattr(args, "lcc_mask_mode", "exact"),
+                    lcc_patch_threshold=getattr(args, "lcc_patch_threshold", 0.5),
+                    loss_region_mode=getattr(args, "loss_region_mode", "all"),
+                    core_patch_radius=getattr(args, "core_patch_radius", 3),
+                    return_aux_masks=True,
+                )
+            else:
+                _, pred, mask, prediction_mask = model(
+                    x, mask_ratio=args.mask_ratio, return_aux_masks=True
+                )
+
+        # restore RNG states so visualization does not affect later randomness
+        torch.random.set_rng_state(cpu_state)
+        if cuda_state is not None:
+            torch.cuda.set_rng_state_all(cuda_state)
+
+        # images (normalized space)
+        pred_img = model.unpatchify(pred)[0, 0].float().cpu()  # [H,W]
+        p = model.patch_embed.patch_size[0]
+        mask_img = mask.unsqueeze(-1).repeat(1, 1, p * p * args.in_chans)
+        mask_img = model.unpatchify(mask_img)[0, 0].float().cpu()  # loss/eval region
+        prediction_mask_img = prediction_mask.unsqueeze(-1).repeat(
+            1, 1, p * p * args.in_chans
+        )
+        prediction_mask_img = model.unpatchify(prediction_mask_img)[0, 0].float().cpu()
+        x0 = x[0, 0].float().cpu()
+        # The model masks/predicts usable river patches across the full tile.
+        # Core mode changes only where loss/RMSE are computed.
+        recon = x0 * (1 - prediction_mask_img) + pred_img * prediction_mask_img
+
+        # patch-space visible median bias correction
+        target_patch = model.patchify(x)[0].float().cpu()   # [L,P]
+        pred_patch = pred[0].float().cpu()                  # [L,P]
+        mask_patch = mask[0].float().cpu()                  # core/all loss mask [L]
+        prediction_mask_patch = prediction_mask[0].float().cpu()
+
+        if valid_mask is not None:
+            valid_patch = model._valid_patch_from_mask(valid_mask)[0].bool().cpu()
+        else:
+            valid_patch = torch.ones_like(mask_patch, dtype=torch.bool)
+        keep_patch = (prediction_mask_patch == 0) & valid_patch
+        if keep_patch.sum() > 0:
+            vis_bias = (pred_patch[keep_patch] - target_patch[keep_patch]).reshape(-1).median()
+        else:
+            vis_bias = torch.tensor(0.0, dtype=pred_patch.dtype)
+
+        pred_patch_corr = pred_patch - vis_bias
+        pred_corr_img = model.unpatchify(pred_patch_corr.unsqueeze(0).to(device))[0, 0].float().cpu()
+        recon_corr = (
+            x0 * (1 - prediction_mask_img)
+            + pred_corr_img * prediction_mask_img
+        )
+
+        gt_m = _denorm(x0, meta, args).cpu()
+        pred_m = _denorm(pred_img, meta, args).cpu()
+        recon_m = _denorm(recon, meta, args).cpu()
+
+        pred_corr_m = _denorm(pred_corr_img, meta, args).cpu()
+        recon_corr_m = _denorm(recon_corr, meta, args).cpu()
+
+        err_m = (recon_m - gt_m).cpu()
+        err_corr_m = (recon_corr_m - gt_m).cpu()
+
+        # to numpy
+        gt_np = gt_m.numpy().astype(np.float32, copy=False)
+        pred_np = pred_m.numpy().astype(np.float32, copy=False)
+        recon_np = recon_m.numpy().astype(np.float32, copy=False)
+        err_np = err_m.numpy().astype(np.float32, copy=False)
+        mask_np = (mask_img.numpy() > 0.5).astype(np.uint8)
+        prediction_mask_np = (
+            prediction_mask_img.numpy() > 0.5
+        ).astype(np.uint8)
+        pred_corr_np = pred_corr_m.numpy().astype(np.float32, copy=False)
+        recon_corr_np = recon_corr_m.numpy().astype(np.float32, copy=False)
+        err_corr_np = err_corr_m.numpy().astype(np.float32, copy=False)
+
+        if valid_mask is not None:
+            valid_np = (
+                valid_mask[0, 0].float().detach().cpu().numpy() > 0.5
+            ).astype(np.uint8)
+        else:
+            valid_np = np.ones_like(mask_np, dtype=np.uint8)
+
+        output_nodata = (
+            float(args.nodata) if getattr(args, "nodata", None) is not None
+            else -999999.0
+        )
+        invalid = valid_np == 0
+        # Never visualize a tensor placeholder as 0 m ground truth.
+        for a in (gt_np, pred_np, recon_np, err_np, pred_corr_np,
+                  recon_corr_np, err_corr_np):
+            a[invalid] = output_nodata
+        mask_np[invalid] = 0
+        prediction_mask_np[invalid] = 0
+
+        base = f"idx{int(idx):06d}"
+        _write_geotiff_like(ref_path, out_epoch / f"{base}_gt_m.tif", gt_np, dtype="float32", nodata=output_nodata)
+        _write_geotiff_like(ref_path, out_epoch / f"{base}_pred_m.tif", pred_np, dtype="float32", nodata=output_nodata)
+        _write_geotiff_like(ref_path, out_epoch / f"{base}_recon_m.tif", recon_np, dtype="float32", nodata=output_nodata)
+        _write_geotiff_like(ref_path, out_epoch / f"{base}_err_m.tif", err_np, dtype="float32", nodata=output_nodata)
+
+        _write_geotiff_like(ref_path, out_epoch / f"{base}_pred_viscorr_m.tif", pred_corr_np, dtype="float32", nodata=output_nodata)
+        _write_geotiff_like(ref_path, out_epoch / f"{base}_recon_viscorr_m.tif", recon_corr_np, dtype="float32", nodata=output_nodata)
+        _write_geotiff_like(ref_path, out_epoch / f"{base}_err_viscorr_m.tif", err_corr_np, dtype="float32", nodata=output_nodata)
+
+        _write_geotiff_like(ref_path, out_epoch / f"{base}_mask.tif", mask_np, dtype="uint8", nodata=0)
+        _write_geotiff_like(ref_path, out_epoch / f"{base}_prediction_mask.tif", prediction_mask_np, dtype="uint8", nodata=0)
+        _write_geotiff_like(ref_path, out_epoch / f"{base}_valid_mask.tif", valid_np, dtype="uint8", nodata=0)
+        if lcc_mask is not None:
+            lcc_np = (lcc_mask[0, 0].float().detach().cpu().numpy() > 0.5).astype(np.uint8)
+            _write_geotiff_like(ref_path, out_epoch / f"{base}_lcc_input_mask.tif", lcc_np, dtype="uint8", nodata=0)
+
+        # output Histogram and scatter to help evaluation
+        # masked-only diagnostics
+        eval_pixels = (mask_np > 0) & (valid_np > 0)
+        masked_vals_gt = gt_np[eval_pixels]
+        masked_vals_recon = recon_np[eval_pixels]
+        masked_vals_recon_corr = recon_corr_np[eval_pixels]
+        if masked_vals_gt.size > 0:
+            masked_err = masked_vals_recon - masked_vals_gt
+            masked_err_corr = masked_vals_recon_corr - masked_vals_gt
+
+            # histogram
+            plt.figure(figsize=(5, 4))
+            plt.hist(masked_err, bins=60, alpha=0.6, label='raw')
+            plt.hist(masked_err_corr, bins=60, alpha=0.6, label='viscorr')
+            plt.xlabel('Error (m)')
+            plt.ylabel('Count')
+            plt.legend()
+            plt.tight_layout()
+            plt.savefig(out_epoch / f"{base}_err_hist.png", dpi=150)
+            plt.close()
+
+            # scatter
+            plt.figure(figsize=(5, 5))
+            plt.scatter(masked_vals_gt, masked_vals_recon, s=2, alpha=0.3, label='raw')
+            plt.scatter(masked_vals_gt, masked_vals_recon_corr, s=2, alpha=0.3, label='viscorr')
+            vmin = float(np.min(masked_vals_gt))
+            vmax = float(np.max(masked_vals_gt))
+            plt.plot([vmin, vmax], [vmin, vmax], '--')
+            plt.xlabel('GT (m)')
+            plt.ylabel('Recon (m)')
+            plt.legend()
+            plt.tight_layout()
+            plt.savefig(out_epoch / f"{base}_gt_vs_recon_scatter.png", dpi=150)
+            plt.close()
+
+def get_args_parser():
+    parser = argparse.ArgumentParser('MAE pre-training (DEM GeoTIFF)', add_help=False)
+
+    # --- data ---
+    parser.add_argument('--data_root', type=str, required=True,
+                        help='Root folder containing train/val/test subfolders (or use *_list).')
+    parser.add_argument('--train_dir', type=str, default='', help='Override train dir (else data_root/train)')
+    parser.add_argument('--val_dir', type=str, default='', help='Override val dir (else data_root/val)')
+    parser.add_argument('--test_dir', type=str, default='', help='Override test dir (else data_root/test)')
+    parser.add_argument('--train_list', type=str, default='', help='TXT list of train GeoTIFF paths')
+    parser.add_argument('--val_list', type=str, default='', help='TXT list of val GeoTIFF paths')
+    parser.add_argument('--test_list', type=str, default='', help='TXT list of test GeoTIFF paths')
+
+    # --- LCC mask pairing for real bathymetry downstream adaptation ---
+    parser.add_argument('--lcc_mask_path', type=str, default='',
+                        help='Root folder containing LCC mask GeoTIFFs paired with bathy/DEM tiles by filename key.')
+    parser.add_argument('--train_lcc_list', type=str, default='', help='TXT list of train LCC mask paths, line-by-line paired with --train_list')
+    parser.add_argument('--val_lcc_list', type=str, default='', help='TXT list of val LCC mask paths, line-by-line paired with --val_list')
+    parser.add_argument('--test_lcc_list', type=str, default='', help='TXT list of test LCC mask paths, line-by-line paired with --test_list')
+
+    # --- MAE v2 dual-mask pairing: merged DEM + Hidden mask + pixel Loss mask ---
+    parser.add_argument('--hidden_mask_path', type=str, default='',
+                        help='Root folder containing Hidden_Mask GeoTIFFs paired with Train_tile by filename key. '
+                             'Hidden mask controls which patches are hidden from the encoder.')
+    parser.add_argument('--loss_mask_path', type=str, default='',
+                        help='Root folder containing Loss_Mask_Pixel GeoTIFFs paired with Train_tile by filename key. '
+                             'Loss mask is pixel-level and controls which pixels contribute to MSE loss.')
+    parser.add_argument('--train_hidden_list', type=str, default='',
+                        help='TXT list of train hidden-mask paths, line-by-line paired with --train_list')
+    parser.add_argument('--val_hidden_list', type=str, default='',
+                        help='TXT list of val hidden-mask paths, line-by-line paired with --val_list')
+    parser.add_argument('--test_hidden_list', type=str, default='',
+                        help='TXT list of test hidden-mask paths, line-by-line paired with --test_list')
+    parser.add_argument('--train_loss_list', type=str, default='',
+                        help='TXT list of train pixel-loss-mask paths, line-by-line paired with --train_list')
+    parser.add_argument('--val_loss_list', type=str, default='',
+                        help='TXT list of val pixel-loss-mask paths, line-by-line paired with --val_list')
+    parser.add_argument('--test_loss_list', type=str, default='',
+                        help='TXT list of test pixel-loss-mask paths, line-by-line paired with --test_list')
+    parser.add_argument('--min_loss_pixel_count', default=1, type=int,
+                        help='Dual-mask dataset safety filter: minimum loss=1 pixels per tile.')
+    parser.add_argument('--min_loss_pixel_ratio', default=0.0, type=float,
+                        help='Dual-mask dataset safety filter: minimum loss=1 pixel ratio per tile.')
+    parser.add_argument('--min_core_loss_pixel_count', default=0, type=int,
+                        help='Optional dual-mask safety filter: minimum loss=1 pixels inside centered core box.')
+    parser.add_argument('--min_core_loss_pixel_ratio', default=0.0, type=float,
+                        help='Optional dual-mask safety filter: minimum loss=1 pixel ratio inside centered core box.')
+    parser.add_argument('--lcc_mask_mode', default='exact', choices=['none', 'priority', 'exact'],
+                        help='none=random MAE mask; priority=fixed mask_ratio but prioritize LCC; exact=mask exactly LCC patches, variable ratio per tile.')
+    parser.add_argument('--loss_on_lcc_only', action='store_true',
+                        help='Compute loss only on masked LCC patches when LCC mask is provided.')
+    parser.add_argument('--lcc_priority', default=10.0, type=float,
+                        help='Priority weight used only when --lcc_mask_mode priority.')
+    parser.add_argument('--lcc_patch_threshold', default=0.5, type=float,
+                        help='Patch is LCC if max-pooled LCC value > threshold.')
+    parser.add_argument('--tile_norm_visible_only', action='store_true',
+                        help='With --tile_norm and LCC data, compute tile mean/std using only non-LCC visible/known pixels.')
+    parser.add_argument('--min_lcc_patch_ratio', default=0.0, type=float,
+                        help='Optional filter: drop tiles whose LCC patch ratio is below this value.')
+    parser.add_argument('--max_lcc_patch_ratio', default=1.0, type=float,
+                        help='Drop tiles whose usable prediction-patch ratio is above this value.')
+    parser.add_argument('--min_valid_visible_patch_ratio', default=0.0, type=float,
+                        help='After removing every patch containing any NoData pixel, drop a tile '
+                             'when its valid visible/known patch ratio is below this value. '
+                             'For the current 336/16 setup, 0.70 is a conservative starting point.')
+    parser.add_argument('--loss_region_mode', default='all', choices=['all', 'core'],
+                        help='all=loss/RMSE on every usable prediction patch; '
+                             'core=mask/predict across the full tile but compute loss/RMSE '
+                             'only on the centered core patch window.')
+    parser.add_argument('--core_patch_radius', default=3, type=int,
+                        help='Half-width of centered core in patch units. Radius 3 gives 7x7 patches.')
+    parser.add_argument('--min_core_valid_patch_ratio', default=0.0, type=float,
+                        help='Core mode tile filter: minimum fraction of all core patches that are fully valid.')
+    parser.add_argument('--min_core_prediction_patch_ratio', default=0.0, type=float,
+                        help='Core mode tile filter: minimum prediction-patch fraction among valid core patches.')
+    parser.add_argument('--max_core_prediction_patch_ratio', default=1.0, type=float,
+                        help='Core mode tile filter: maximum prediction-patch fraction among valid core patches.')
+    parser.add_argument('--extra_eval_dir', type=str, default='',
+                        help='An extra directory to evaluate at the end (e.g., KY holdout tiles).')
+
+    parser.add_argument('--input_size', default=336, type=int,
+                        help='images input size (must be divisible by patch size)')
+    parser.add_argument('--in_chans', default=1, type=int,
+                        help='Input channels. DEM should be 1.')
+
+    # Nodata handling
+    parser.add_argument('--nodata', default=-9999.0, type=float,
+                        help='Declared NoData value in input tiles.')
+    parser.add_argument('--nodata_threshold', default=-9999.0, type=float,
+                        help='Robust NoData rule: values <= this threshold are invalid. '
+                             'This catches -9999, -99999, and -999999 sentinels.')
+
+    # --- normalization ---
+    parser.add_argument('--norm_method', default='meanstd', choices=['meanstd', 'minmax'],
+                        help='Global normalization computed from TRAIN split.')
+    parser.add_argument('--norm_json', default='', type=str,
+                        help='If provided, load normalization stats from this JSON instead of computing.')
+    parser.add_argument('--stats_max_files', default=0, type=int,
+                        help='If >0, compute normalization using only first N train files (for quick experiments).')
+
+    # --- model ---
+    parser.add_argument('--model', default='mae_vit_large_patch16', type=str, metavar='MODEL',
+                        help='Name of model to train')
+    parser.add_argument('--mask_ratio', default=0.75, type=float,
+                        help='Masking ratio (percentage of removed patches).')
+    parser.add_argument('--norm_pix_loss', action='store_true',
+                        help='Normalize target patches per-sample (original MAE). For DEM, usually keep False.')
+    parser.add_argument('--tile_norm', action='store_true',
+                        help='Apply tile-wise mean/std normalization in dataset preprocessing.')
+    parser.add_argument('--tile_norm_eps', default=1e-3, type=float,
+                        help='Minimum std used in tile-wise normalization.')
+    parser.add_argument('--tile_norm_std_scale', default=1.0, type=float,
+                        help='Scale factor multiplied to tile std in tile-wise normalization. '
+                             'Use >1, e.g. 1.5, to enlarge the normalization range.')                   
+                             
+    parser.add_argument('--bottleneck_norm', default='none', choices=['none', 'inst1d'])
+    parser.add_argument(
+        '--optimization_loss',
+        default='normalized_mse',
+        choices=['meter_mae', 'normalized_mse'],
+        help=(
+            'Primary differentiable training objective. meter_mae computes '
+            'pixel-weighted absolute error after inverse tile normalization on '
+            'the exact dual-mask/core supervision region. normalized_mse '
+            'uses exact core-pixel normalized MSE. In stage 2, checkpoint selection can still remain on val_mae_m_mask.'
+        ),
+    )
+    parser.add_argument(
+        '--loss_mode',
+        default='mse',
+        choices=['mse'],
+        help='Internal model auxiliary loss mode. Keep mse; --optimization_loss controls gradients.',
+    )
+
+    # --- training ---
+    parser.add_argument('--batch_size', default=64, type=int)
+    parser.add_argument('--epochs', default=400, type=int)
+    parser.add_argument('--accum_iter', default=1, type=int,
+                        help='gradient accumulation iterations')
+
+    parser.add_argument('--weight_decay', type=float, default=0.05)
+    parser.add_argument('--lr', type=float, default=None, metavar='LR',
+                        help='learning rate (absolute lr)')
+    parser.add_argument('--blr', type=float, default=1e-3, metavar='LR',
+                        help='base learning rate: absolute_lr = base_lr * total_batch_size / 256')
+    parser.add_argument('--min_lr', type=float, default=0., metavar='LR',
+                        help='lower lr bound for cyclic schedulers that hit 0')
+
+    parser.add_argument('--warmup_epochs', type=int, default=40, metavar='N',
+                        help='epochs to warmup LR')
+
+    parser.add_argument('--num_workers', default=8, type=int)
+    parser.add_argument('--pin_mem', action='store_true')
+    parser.set_defaults(pin_mem=True)
+
+    # evaluation
+    parser.add_argument('--eval_rmse', action='store_true',
+                        help='Also compute RMSE (masked + all) in meters during val/test evaluation.')
+    parser.add_argument('--baseline_eval_before_training', action='store_true',
+                        help=('Evaluate the untouched init/resume model on validation data before any optimizer update. '
+                              'When start_epoch=0, save baseline_val.json and checkpoint-baseline.pth, and initialize '
+                              'checkpoint-best.pth from this baseline if the selected metric is finite.'))
+    parser.add_argument('--no_baseline_eval_before_training', action='store_false',
+                        dest='baseline_eval_before_training',
+                        help='Disable the pre-training validation baseline evaluation.')
+    parser.set_defaults(baseline_eval_before_training=True)
+    
+    # Visulization
+    parser.add_argument('--vis_every', default=5, type=int)
+    parser.add_argument('--vis_n', default=10, type=int)
+    
+    # curves / early-stop helpers
+    parser.add_argument('--history_csv', default='', type=str,
+                        help='Where to save epoch-level history CSV (default: <output_dir>/history.csv).')
+    parser.add_argument('--plot_every', default=1, type=int,
+                        help='Update curve PNGs every N epochs (default: 1).')
+    parser.add_argument('--no_plot_curves', action='store_true',
+                        help='Disable generating curve PNGs during training.')
+    parser.add_argument('--early_stop_patience', default=0, type=int,
+                        help='If >0, enable early stopping when metric does not improve for N epochs.')
+    parser.add_argument('--early_stop_metric', default='val_loss',
+                        choices=[
+                          'val_loss',
+                          'val_mae_m_mask',
+                          'val_rmse_m_mask', 'val_rmse_m_all',
+                          'val_rmse_m_mask_viscorr', 'val_rmse_m_all_viscorr',
+                          'val_bias_m_vis_med',
+                        ],
+                        help='Metric to monitor for early stopping.')
+    parser.add_argument('--early_stop_min_delta', default=0.0, type=float,
+                        help='Minimum improvement to reset early stop patience.')
+    parser.add_argument('--early_stop_warmup_epochs', default=0, type=int,
+                        help='Do not allow early stopping until this epoch (warmup).')
+    parser.add_argument('--early_stop_start_threshold', default=0.0, type=float,
+                        help=('Only start counting early-stop patience after the monitored metric '
+                              'reaches this threshold (e.g., RMSE <= threshold). 0 disables.'))
+
+    # best checkpoint selection
+    parser.add_argument('--best_metric', default='',
+                        choices=[
+                          '',
+                          'val_loss',
+                          'val_mae_m_mask',
+                          'val_rmse_m_mask', 'val_rmse_m_all',
+                          'val_rmse_m_mask_viscorr', 'val_rmse_m_all_viscorr',
+                          'val_bias_m_vis_med',
+                        ],
+                        help=('Metric used to save checkpoint-best.pth. '
+                              'If empty: use val_mae_m_mask for meter_mae optimization; otherwise use val_rmse_m_mask when --eval_rmse, else val_loss.'))
+
+    # misc
+    parser.add_argument('--output_dir', default='./output_dem', type=str)
+    parser.add_argument('--log_dir', default='./output_dem', type=str)
+    parser.add_argument('--device', default='cuda')
+    parser.add_argument('--seed', default=0, type=int)
+    parser.add_argument('--resume', default='', help='resume from checkpoint')
+    parser.add_argument('--start_epoch', default=0, type=int, metavar='N')
+
+    # distributed
+    parser.add_argument('--world_size', default=1, type=int,
+                        help='number of distributed processes')
+    parser.add_argument('--local_rank', default=-1, type=int)
+    parser.add_argument('--dist_on_itp', action='store_true')
+    parser.add_argument('--dist_url', default='env://', help='url used to set up distributed training')
+
+    # decorder trainning
+    parser.add_argument('--init_ckpt', default='',
+                    help='load pretrained upstream checkpoint weights only (do not resume optimizer)')
+    parser.add_argument('--freeze_encoder', action='store_true',
+                        help='freeze encoder and train decoder only')
+    parser.add_argument('--freeze_last_n_encoder_blocks', default=0, type=int,
+                        help='optional: keep last N encoder blocks trainable (0 means fully freeze encoder)')
+
+    return parser
+
+
+def _resolve_split_dir(data_root: str, split: str, override: str) -> str:
+    if override:
+        return override
+    return os.path.join(data_root, split)
+
+
+def _save_checkpoint(path: str, model, optimizer, loss_scaler, epoch: int, args, dem_norm: Dict):
+    to_save = {
+        'model': model.state_dict(),
+        'optimizer': optimizer.state_dict(),
+        'epoch': epoch,
+        'scaler': loss_scaler.state_dict(),
+        'args': vars(args),
+        'dem_norm': dem_norm,
+    }
+    misc.save_on_master(to_save, path)
+
+
+def _safe_float(v: Any) -> float:
+    try:
+        return float(v)
+    except Exception:
+        return float('nan')
+
+
+def _load_history(csv_path: Path) -> List[Dict[str, float]]:
+    if not csv_path.exists():
+        return []
+    rows: List[Dict[str, float]] = []
+    with csv_path.open('r', newline='', encoding='utf-8') as f:
+        reader = csv.DictReader(f)
+        for r in reader:
+            rows.append({k: _safe_float(v) for k, v in r.items()})
+    return rows
+
+
+def _save_history(csv_path: Path, rows: List[Dict[str, float]], fieldnames: List[str]) -> None:
+    csv_path.parent.mkdir(parents=True, exist_ok=True)
+    with csv_path.open('w', newline='', encoding='utf-8') as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+        for r in rows:
+            writer.writerow({k: r.get(k, float('nan')) for k in fieldnames})
+
+
+def _maybe_plot_curves(history: List[Dict[str, float]], out_dir: Path, plot_rmse: bool) -> None:
+    """Generate/overwrite curve PNGs from history.
+
+    This is best-effort: if matplotlib is not available, training continues.
+    """
+    try:
+        import matplotlib
+        matplotlib.use('Agg')
+        import matplotlib.pyplot as plt
+    except Exception as e:
+        print(f"[WARN] matplotlib not available; skip plotting curves. ({e})")
+        return
+
+    if not history:
+        return
+
+    epochs = [int(r.get('epoch', 0)) for r in history]
+
+    def _plot_one(y_train_key: str, y_val_key: str, ylabel: str, out_name: str):
+        y_tr = [r.get(y_train_key, float('nan')) for r in history]
+        y_va = [r.get(y_val_key, float('nan')) for r in history]
+        
+        has_tr = not all(np.isnan(y_tr))
+        has_va = not all(np.isnan(y_va))
+        if (not has_tr) and (not has_va):
+            return
+        
+        plt.figure()
+        if has_tr:
+            plt.plot(epochs, y_tr, label='train')
+        if has_va:
+            plt.plot(epochs, y_va, label='val')
+
+        plt.xlabel('epoch')
+        plt.ylabel(ylabel)
+        plt.legend()
+        plt.grid(True, alpha=0.3)
+        plt.tight_layout()
+        plt.savefig(out_dir / out_name, dpi=150)
+        plt.close()
+
+    _plot_one('train_loss', 'val_loss', 'optimization loss', 'curve_loss.png')
+    _plot_one('train_mae_m_mask', 'val_mae_m_mask', 'MAE (m) on exact core pixel mask', 'curve_mae_m_mask.png')
+    _plot_one('train_normalized_mse_mask', 'val_normalized_mse_mask', 'Auxiliary normalized MSE on exact core pixel mask', 'curve_normalized_mse_mask.png')
+
+    if plot_rmse:
+        _plot_one('train_rmse_m_mask', 'val_rmse_m_mask', 'RMSE (m) on masked patches', 'curve_rmse_mask.png')
+        _plot_one('train_rmse_m_all', 'val_rmse_m_all', 'RMSE (m) on pasted full tile', 'curve_rmse_all.png')
+
+        _plot_one('train_rmse_m_mask_viscorr', 'val_rmse_m_mask_viscorr', 'RMSE (m) masked (visible bias-corr)', 'curve_rmse_mask_viscorr.png')
+        _plot_one('train_rmse_m_all_viscorr',  'val_rmse_m_all_viscorr',  'RMSE (m) all (visible bias-corr)',    'curve_rmse_all_viscorr.png')
+
+        _plot_one('train_bias_m_vis_med', 'val_bias_m_vis_med', 'Bias (m) visible-median',        'curve_bias_vis_med.png')
+
+def freeze_for_decoder_adaptation(model, last_n_blocks: int = 0):
+    """
+    Freeze encoder for downstream decoder adaptation.
+    If last_n_blocks > 0, keep the last N encoder blocks trainable.
+    """
+    # freeze patch embedding
+    for p in model.patch_embed.parameters():
+        p.requires_grad = False
+
+    # freeze cls token / pos embed
+    model.cls_token.requires_grad = False
+    model.pos_embed.requires_grad = False
+
+    # freeze all encoder blocks first
+    for blk in model.blocks:
+        for p in blk.parameters():
+            p.requires_grad = False
+
+    # optionally unfreeze last N encoder blocks
+    if last_n_blocks > 0:
+        for blk in model.blocks[-last_n_blocks:]:
+            for p in blk.parameters():
+                p.requires_grad = True
+
+    # freeze encoder norm
+    for p in model.norm.parameters():
+        p.requires_grad = False
+
+    # bottleneck norm belongs to encoder side
+    if getattr(model, "bottleneck_norm", None) is not None:
+        for p in model.bottleneck_norm.parameters():
+            p.requires_grad = False
+
+    # decoder stays trainable:
+    # decoder_embed, mask_token, decoder_pos_embed, decoder_blocks, decoder_norm, decoder_pred
+
+    # print summary
+    total, trainable = 0, 0
+    for _, p in model.named_parameters():
+        n = p.numel()
+        total += n
+        if p.requires_grad:
+            trainable += n
+    print(f"[FREEZE] total params={total:,}, trainable params={trainable:,}")
+
+def main(args):
+    misc.init_distributed_mode(args)
+
+    print('job dir: {}'.format(os.path.dirname(os.path.realpath(__file__))))
+    print("{}".format(args).replace(', ', ',\n'))
+
+    device = torch.device(args.device)
+
+    # fix the seed for reproducibility
+    seed = args.seed + misc.get_rank()
+    torch.manual_seed(seed)
+    np.random.seed(seed)
+
+    cudnn.benchmark = True
+
+    # ---- build datasets (no normalization yet) ----
+    train_dir = _resolve_split_dir(args.data_root, 'train', args.train_dir)
+    val_dir = _resolve_split_dir(args.data_root, 'val', args.val_dir)
+    test_dir = _resolve_split_dir(args.data_root, 'test', args.test_dir)
+
+    use_dual_masks = bool(
+        args.hidden_mask_path or args.loss_mask_path
+        or args.train_hidden_list or args.val_hidden_list or args.test_hidden_list
+        or args.train_loss_list or args.val_loss_list or args.test_loss_list
+    )
+    use_lcc = (not use_dual_masks) and bool(
+        args.lcc_mask_path or args.train_lcc_list or args.val_lcc_list or args.test_lcc_list
+    )
+
+    if use_dual_masks:
+        if not (
+            (args.hidden_mask_path or args.train_hidden_list or args.val_hidden_list or args.test_hidden_list)
+            and (args.loss_mask_path or args.train_loss_list or args.val_loss_list or args.test_loss_list)
+        ):
+            raise ValueError('Dual-mask mode requires both hidden masks and pixel loss masks.')
+        if args.lcc_mask_mode != 'exact':
+            print('[WARN] Dual-mask mode should normally use --lcc_mask_mode exact; overriding behavior is not recommended.')
+        print(
+            f'[DATA] Using MAE v2 dual masks: DEM + Hidden_Mask + Loss_Mask_Pixel. '
+            f'mode={args.lcc_mask_mode}, '
+            f'tile_norm={args.tile_norm}, '
+            f'tile_norm_visible_only={args.tile_norm_visible_only}, '
+            f'tile_norm_std_scale={args.tile_norm_std_scale}, '
+            f'tile_norm_eps={args.tile_norm_eps}, '
+            f'nodata={args.nodata}, '
+            f'nodata_threshold={args.nodata_threshold}, '
+            f'min_valid_visible_patch_ratio={args.min_valid_visible_patch_ratio}, '
+            f'min_loss_pixel_count={args.min_loss_pixel_count}, '
+            f'min_loss_pixel_ratio={args.min_loss_pixel_ratio}, '
+            f'min_core_loss_pixel_count={args.min_core_loss_pixel_count}, '
+            f'min_core_loss_pixel_ratio={args.min_core_loss_pixel_ratio}'
+        )
+    elif use_lcc:
+        if args.lcc_mask_mode == 'none':
+            print('[WARN] LCC masks are provided but --lcc_mask_mode none; masks will be loaded but ignored by the model.')
+        print(
+            f'[DATA] Using paired DEM/bathy + LCC masks. '
+            f'mode={args.lcc_mask_mode}, '
+            f'tile_norm={args.tile_norm}, '
+            f'tile_norm_visible_only={args.tile_norm_visible_only}, '
+            f'tile_norm_std_scale={args.tile_norm_std_scale}, '
+            f'tile_norm_eps={args.tile_norm_eps}, '
+            f'nodata={args.nodata}, '
+            f'nodata_threshold={args.nodata_threshold}, '
+            f'min_valid_visible_patch_ratio={args.min_valid_visible_patch_ratio}, '
+            f'loss_region_mode={args.loss_region_mode}, '
+            f'core_patch_radius={args.core_patch_radius}, '
+            f'core_valid_min={args.min_core_valid_patch_ratio}, '
+            f'core_prediction_range=['
+            f'{args.min_core_prediction_patch_ratio},'
+            f'{args.max_core_prediction_patch_ratio}]'
+        )
+        
+    def _make_dataset(split_name: str, random_flip: bool, return_path: bool):
+        dem_dir = {'train': train_dir, 'val': val_dir, 'test': test_dir}[split_name]
+        dem_list = getattr(args, f'{split_name}_list')
+        lcc_list = getattr(args, f'{split_name}_lcc_list')
+        hidden_list = getattr(args, f'{split_name}_hidden_list')
+        loss_list = getattr(args, f'{split_name}_loss_list')
+
+        if use_dual_masks:
+            return DEMDualMaskDataset(
+                dem_dir=dem_dir if not dem_list else '',
+                hidden_dir=args.hidden_mask_path if args.hidden_mask_path else '',
+                loss_dir=args.loss_mask_path if args.loss_mask_path else '',
+                dem_list_path=dem_list if dem_list else None,
+                hidden_list_path=hidden_list if hidden_list else None,
+                loss_list_path=loss_list if loss_list else None,
+                input_size=args.input_size,
+                nodata=args.nodata,
+                nodata_threshold=args.nodata_threshold,
+                random_flip=random_flip,
+                return_path=return_path,
+                tile_norm=args.tile_norm,
+                tile_norm_eps=args.tile_norm_eps,
+                tile_norm_std_scale=args.tile_norm_std_scale,
+                return_meta=True,
+                tile_norm_visible_only=args.tile_norm_visible_only,
+                min_valid_visible_patch_ratio=args.min_valid_visible_patch_ratio,
+                min_loss_pixel_count=args.min_loss_pixel_count,
+                min_loss_pixel_ratio=args.min_loss_pixel_ratio,
+                min_core_loss_pixel_count=args.min_core_loss_pixel_count,
+                min_core_loss_pixel_ratio=args.min_core_loss_pixel_ratio,
+                core_patch_radius=args.core_patch_radius,
+                patch_size=16,
+                hidden_patch_threshold=args.lcc_patch_threshold,
+            )
+
+        if use_lcc:
+            return DEMLCCPairDataset(
+                dem_dir=dem_dir if not dem_list else '',
+                lcc_dir=args.lcc_mask_path if args.lcc_mask_path else '',
+                dem_list_path=dem_list if dem_list else None,
+                lcc_list_path=lcc_list if lcc_list else None,
+                input_size=args.input_size,
+                nodata=args.nodata,
+                nodata_threshold=args.nodata_threshold,
+                random_flip=random_flip,
+                return_path=return_path,
+                tile_norm=args.tile_norm,
+                tile_norm_eps=args.tile_norm_eps,
+                tile_norm_std_scale=args.tile_norm_std_scale,
+                return_meta=True,
+                tile_norm_visible_only=args.tile_norm_visible_only,
+                min_lcc_patch_ratio=args.min_lcc_patch_ratio,
+                max_lcc_patch_ratio=args.max_lcc_patch_ratio,
+                min_valid_visible_patch_ratio=args.min_valid_visible_patch_ratio,
+                loss_region_mode=args.loss_region_mode,
+                core_patch_radius=args.core_patch_radius,
+                min_core_valid_patch_ratio=args.min_core_valid_patch_ratio,
+                min_core_prediction_patch_ratio=args.min_core_prediction_patch_ratio,
+                max_core_prediction_patch_ratio=args.max_core_prediction_patch_ratio,
+                patch_size=16,
+                lcc_patch_threshold=args.lcc_patch_threshold,
+            )
+        return DEMTileDataset(
+            dir_path=dem_dir if not dem_list else '',
+            list_path=dem_list if dem_list else '',
+            input_size=args.input_size,
+            nodata=args.nodata,
+            nodata_threshold=args.nodata_threshold,
+            random_flip=random_flip,
+            return_path=return_path,
+            tile_norm=args.tile_norm,
+            tile_norm_eps=args.tile_norm_eps,
+            tile_norm_std_scale=args.tile_norm_std_scale,
+            return_meta=True,
+        )
+
+    train_ds = _make_dataset('train', random_flip=True, return_path=False)
+    val_ds = _make_dataset('val', random_flip=False, return_path=False)
+
+    # ---- visualization datasets (NO random flip; can return file path) ----
+    train_vis_ds = _make_dataset('train', random_flip=False, return_path=True)
+    val_vis_ds = _make_dataset('val', random_flip=False, return_path=True)
+
+    # ---- compute / load global normalization (TRAIN only) ----
+    norm_path = args.norm_json
+    out_dir = Path(args.output_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    if not norm_path:
+        norm_path = str(out_dir / 'norm_stats_train.json')
+
+    if args.norm_json and os.path.isfile(args.norm_json):
+        dem_norm = load_json(args.norm_json)
+        if misc.is_main_process():
+            print(f"[NORM] loaded from: {args.norm_json}")
+    else:
+        if misc.is_main_process():
+            max_files = args.stats_max_files if args.stats_max_files and args.stats_max_files > 0 else None
+            dem_norm = compute_dem_stats(
+                train_ds.files,
+                nodata=args.nodata,
+                nodata_threshold=args.nodata_threshold,
+                max_files=max_files,
+                method=args.norm_method,
+            )
+            if args.nodata is None and float(dem_norm.get("min", 0)) <= -9000:
+                raise ValueError(
+                    f"[NORM] Detected extreme min={dem_norm['min']} (likely nodata). "
+                    f"Please rerun with --nodata -9999 (or correct nodata)."
+                )
+
+            save_json(dem_norm, norm_path)
+            print(f"[NORM] computed from train split and saved to: {norm_path}")
+        else:
+            dem_norm = {}
+
+        # broadcast to all ranks
+        if args.distributed:
+            obj_list = [dem_norm]
+            torch.distributed.broadcast_object_list(obj_list, src=0)
+            dem_norm = obj_list[0]
+
+    # attach normalization to datasets
+    if args.norm_method == 'meanstd':
+        mean = float(dem_norm['mean'])
+        std = float(dem_norm['std'])
+        train_ds.set_norm(mean, std)
+        val_ds.set_norm(mean, std)
+        train_vis_ds.set_norm(mean, std)
+        val_vis_ds.set_norm(mean, std)
+    else:
+        # minmax scaling
+        vmin = float(dem_norm['min'])
+        vmax = float(dem_norm['max'])
+        train_ds.set_norm(vmin, vmax, method='minmax')
+        val_ds.set_norm(vmin, vmax, method='minmax')
+        train_vis_ds.set_norm(vmin, vmax, method='minmax')
+        val_vis_ds.set_norm(vmin, vmax, method='minmax')
+
+    # also store on args for RMSE(m) conversion
+    args.dem_norm = dem_norm
+    args.norm_mean = float(dem_norm.get('mean', 0.0))
+    args.norm_std = float(dem_norm.get('std', 1.0))
+    # engine_pretrain uses args.log_rmse
+    args.log_rmse = bool(args.eval_rmse)
+    if misc.is_main_process():
+        print('[OBJECTIVE] optimization_loss=', args.optimization_loss)
+        if args.optimization_loss == 'meter_mae':
+            print('[OBJECTIVE] pixel-weighted MAE in meters after inverse tile normalization')
+            print('[OBJECTIVE] exact region = Loss_Mask_Pixel AND prediction/core patch mask AND valid patch')
+        elif args.optimization_loss == 'normalized_mse':
+            print('[OBJECTIVE] exact pixel-weighted normalized MSE for stage-2 relative-shape refinement')
+            print('[OBJECTIVE] exact region = Loss_Mask_Pixel AND prediction/core patch mask AND valid patch')
+            print('[SAFETY] checkpoint and early stopping metrics may remain val_mae_m_mask')
+    # meters-scale factor depends on normalization method
+    if args.norm_method == 'meanstd':
+        args.norm_scale_m = args.norm_std
+    else:
+        args.norm_scale_m = float(dem_norm.get('max', 1.0)) - float(dem_norm.get('min', 0.0))
+
+    # ---- fixed visualization indices (stable across epochs/resumes) ----
+    if misc.is_main_process() and args.vis_every > 0 and args.vis_n > 0:
+        vis_root = out_dir / "vis_tif"
+        train_vis_idxs = get_or_make_vis_indices(train_vis_ds, args.vis_n, seed=args.seed + 123, save_path=vis_root / "train_indices.txt")
+        val_vis_idxs   = get_or_make_vis_indices(val_vis_ds,   args.vis_n, seed=args.seed + 456, save_path=vis_root / "val_indices.txt")
+    else:
+        train_vis_idxs, val_vis_idxs = None, None
+
+    # ---- samplers & loaders ----
+    if args.distributed:
+        num_tasks = misc.get_world_size()
+        global_rank = misc.get_rank()
+        train_sampler = torch.utils.data.DistributedSampler(train_ds, num_replicas=num_tasks, rank=global_rank, shuffle=True)
+        val_sampler = torch.utils.data.DistributedSampler(val_ds, num_replicas=num_tasks, rank=global_rank, shuffle=False)
+    else:
+        train_sampler = torch.utils.data.RandomSampler(train_ds)
+        val_sampler = torch.utils.data.SequentialSampler(val_ds)
+
+    train_loader = torch.utils.data.DataLoader(
+        train_ds,
+        sampler=train_sampler,
+        batch_size=args.batch_size,
+        num_workers=args.num_workers,
+        pin_memory=args.pin_mem,
+        drop_last=True,
+    )
+    val_loader = torch.utils.data.DataLoader(
+        val_ds,
+        sampler=val_sampler,
+        batch_size=args.batch_size,
+        num_workers=args.num_workers,
+        pin_memory=args.pin_mem,
+        drop_last=False,
+    )
+
+    # ---- model ----
+    model = models_mae.__dict__[args.model](
+        norm_pix_loss=args.norm_pix_loss,
+        img_size=args.input_size,
+        in_chans=args.in_chans,
+        bottleneck_norm=args.bottleneck_norm,
+        loss_mode=args.loss_mode,
+    )
+    model.to(device)
+
+    model_without_ddp = model
+    if args.distributed:
+        model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[args.gpu], find_unused_parameters=False)
+        model_without_ddp = model.module
+
+    # ---- optimizer ----
+    eff_batch_size = args.batch_size * args.accum_iter * misc.get_world_size()
+    if args.lr is None:  # only base_lr is specified
+        args.lr = args.blr * eff_batch_size / 256
+
+    if misc.is_main_process():
+        print(f"base_lr: {args.blr:.2e}")
+        print(f"actual_lr: {args.lr:.2e}")
+        print(f"effective_batch_size: {eff_batch_size}")
+
+    # ---- init from upstream checkpoint (weights only) ----
+    if args.init_ckpt:
+        checkpoint = torch.load(args.init_ckpt, map_location='cpu')
+        state_dict = checkpoint['model'] if 'model' in checkpoint else checkpoint
+        msg = model_without_ddp.load_state_dict(state_dict, strict=False)
+        print(f"[INIT_CKPT] loaded from {args.init_ckpt}")
+        print(f"[INIT_CKPT] missing_keys={msg.missing_keys}")
+        print(f"[INIT_CKPT] unexpected_keys={msg.unexpected_keys}")
+
+    # ---- freeze encoder for downstream decoder adaptation ----
+    if args.freeze_encoder:
+        freeze_for_decoder_adaptation(
+            model_without_ddp,
+            last_n_blocks=args.freeze_last_n_encoder_blocks
+        )
+
+    import timm.optim.optim_factory as optim_factory
+    #param_groups = optim_factory.param_groups_weight_decay(model_without_ddp, args.weight_decay)
+    #optimizer = torch.optim.AdamW(param_groups, lr=args.lr, betas=(0.9, 0.95))
+    
+    # ---- optimizer: only trainable params ----
+    decay, no_decay = [], []
+    for name, p in model_without_ddp.named_parameters():
+        if not p.requires_grad:
+            continue
+        if p.ndim <= 1 or name.endswith(".bias"):
+            no_decay.append(p)
+        else:
+            decay.append(p)
+
+    param_groups = [
+        {"params": decay, "weight_decay": args.weight_decay},
+        {"params": no_decay, "weight_decay": 0.0},
+    ]
+    optimizer = torch.optim.AdamW(param_groups, lr=args.lr, betas=(0.9, 0.95))
+
+    loss_scaler = NativeScaler()
+
+    # ---- resume ----
+    if args.resume:
+        checkpoint = torch.load(args.resume, map_location='cpu')
+        model_without_ddp.load_state_dict(checkpoint['model'], strict=False)
+        if 'optimizer' in checkpoint and 'epoch' in checkpoint:
+            optimizer.load_state_dict(checkpoint['optimizer'])
+            args.start_epoch = checkpoint['epoch'] + 1
+        if 'scaler' in checkpoint:
+            loss_scaler.load_state_dict(checkpoint['scaler'])
+        if misc.is_main_process():
+            print(f"[RESUME] loaded: {args.resume} (start_epoch={args.start_epoch})")
+
+    # ---- logging ----
+    log_writer = None
+    if misc.is_main_process() and SummaryWriter is not None:
+        log_writer = SummaryWriter(log_dir=args.log_dir)
+
+    # history & curve outputs (main process only)
+    history_csv = Path(args.history_csv) if args.history_csv else (out_dir / 'history.csv')
+    history: List[Dict[str, float]] = _load_history(history_csv) if misc.is_main_process() else []
+
+    # early stopping state
+    best_metric = float('inf')
+    bad_epochs = 0
+    es_activated = False
+
+    print_freq = 20
+    # select best checkpoint metric
+    best_metric_name = args.best_metric
+    if best_metric_name == '':
+        if args.optimization_loss == 'meter_mae':
+            best_metric_name = 'val_mae_m_mask'
+        else:
+            best_metric_name = 'val_rmse_m_mask' if args.eval_rmse else 'val_loss'
+
+    best_val = float('inf')  # best value for best_metric_name
+    best_epoch = -1
+
+    def _selected_val_metric(stats: Dict[str, Any], metric_name: str) -> Tuple[str, float]:
+        """Return the checkpoint-selection metric from one validation stats dictionary."""
+        resolved_name = metric_name
+        if resolved_name == 'val_loss':
+            value = float(stats.get('loss', float('inf')))
+        else:
+            key = resolved_name.replace('val_', '')
+            value = float(stats.get(key, float('inf')))
+            if not np.isfinite(value):
+                if misc.is_main_process():
+                    print(
+                        f"[WARN] best_metric={resolved_name} unavailable; "
+                        "fall back to val_loss."
+                    )
+                resolved_name = 'val_loss'
+                value = float(stats.get('loss', float('inf')))
+        return resolved_name, value
+
+    def _history_fieldnames() -> List[str]:
+        names = [
+            'epoch', 'lr', 'train_loss', 'val_loss',
+            'train_mae_m_mask', 'val_mae_m_mask',
+            'train_normalized_mse_mask', 'val_normalized_mse_mask',
+            'train_supervised_pixel_count', 'val_supervised_pixel_count',
+        ]
+        if args.eval_rmse:
+            names += [
+                'train_rmse_m_mask', 'val_rmse_m_mask',
+                'train_rmse_m_all', 'val_rmse_m_all',
+                'train_rmse_m_mask_viscorr', 'val_rmse_m_mask_viscorr',
+                'train_rmse_m_all_viscorr', 'val_rmse_m_all_viscorr',
+                'train_bias_m_vis_med', 'val_bias_m_vis_med',
+                'train_actual_mask_ratio', 'val_actual_mask_ratio',
+                'train_actual_prediction_mask_ratio',
+                'val_actual_prediction_mask_ratio',
+            ]
+        return names
+
+    def _baseline_history_row(stats: Dict[str, Any]) -> Dict[str, float]:
+        nan = float('nan')
+        row = {
+            'epoch': -1.0,
+            'lr': 0.0,
+            'train_loss': nan,
+            'val_loss': float(stats.get('loss', nan)),
+            'train_mae_m_mask': nan,
+            'val_mae_m_mask': float(stats.get('mae_m_mask', nan)),
+            'train_normalized_mse_mask': nan,
+            'val_normalized_mse_mask': float(
+                stats.get('normalized_mse_mask', nan)
+            ),
+            'train_supervised_pixel_count': nan,
+            'val_supervised_pixel_count': float(
+                stats.get('supervised_pixel_count', nan)
+            ),
+        }
+        if args.eval_rmse:
+            row.update({
+                'train_rmse_m_mask': nan,
+                'val_rmse_m_mask': float(stats.get('rmse_m_mask', nan)),
+                'train_rmse_m_all': nan,
+                'val_rmse_m_all': float(stats.get('rmse_m_all', nan)),
+                'train_rmse_m_mask_viscorr': nan,
+                'val_rmse_m_mask_viscorr': float(
+                    stats.get('rmse_m_mask_viscorr', nan)
+                ),
+                'train_rmse_m_all_viscorr': nan,
+                'val_rmse_m_all_viscorr': float(
+                    stats.get('rmse_m_all_viscorr', nan)
+                ),
+                'train_bias_m_vis_med': nan,
+                'val_bias_m_vis_med': float(
+                    stats.get('bias_m_vis_med', nan)
+                ),
+                'train_actual_mask_ratio': nan,
+                'val_actual_mask_ratio': float(
+                    stats.get('actual_mask_ratio', nan)
+                ),
+                'train_actual_prediction_mask_ratio': nan,
+                'val_actual_prediction_mask_ratio': float(
+                    stats.get('actual_prediction_mask_ratio', nan)
+                ),
+            })
+        return row
+
+    best_summary_path = out_dir / 'best_metric_summary.json'
+
+    # Restore the best-value bookkeeping when resuming a partially completed
+    # run. This prevents a resumed, worse epoch from overwriting an earlier
+    # checkpoint-best.pth.
+    if args.start_epoch > 0 and best_summary_path.exists():
+        try:
+            previous_best = load_json(str(best_summary_path))
+            if previous_best.get('best_metric') == best_metric_name:
+                best_val = float(previous_best['best_metric_value'])
+                best_epoch = int(previous_best['best_epoch'])
+                best_metric = best_val
+                print(
+                    f"[BEST-STATE] restored {best_metric_name}={best_val:.6f} "
+                    f"at epoch={best_epoch}"
+                )
+        except Exception as exc:
+            print(f"[WARN] Could not restore best metric summary: {exc}")
+
+    # ------------------------------------------------------------------
+    # Baseline-before-training validation
+    # ------------------------------------------------------------------
+    # This evaluates the initialized downstream model before optimizer.step().
+    # It is validation-only, uses the exact same validation loader/masks and
+    # inverse tile normalization as later epochs, and is recorded as epoch -1.
+    # checkpoint-best.pth is initialized from this model. Consequently, if no
+    # fine-tuned epoch beats the baseline meter MAE, the baseline remains the
+    # scientifically correct best model.
+    baseline_stats = None
+    if args.baseline_eval_before_training and args.start_epoch == 0:
+        print("=" * 76)
+        print("[BASELINE] Validation before any downstream optimizer update")
+        print("[BASELINE] epoch_label=-1")
+        print(f"[BASELINE] checkpoint_init={args.init_ckpt}")
+        print(f"[BASELINE] selected_metric={best_metric_name}")
+        print("=" * 76)
+
+        baseline_stats = evaluate_one_epoch(
+            model, val_loader, device, epoch=-1, log_writer=None,
+            args=args, prefix='baseline_val'
+        )
+        best_metric_name, baseline_metric = _selected_val_metric(
+            baseline_stats, best_metric_name
+        )
+
+        baseline_is_finite = bool(np.isfinite(baseline_metric))
+        if baseline_is_finite:
+            # Keep best-state and early-stop reference synchronized on every
+            # process, not only on rank 0.
+            best_val = baseline_metric
+            best_epoch = -1
+            best_metric = baseline_metric
+
+        if misc.is_main_process():
+            save_json(
+                baseline_stats,
+                str(out_dir / 'baseline_val.json')
+            )
+            _save_checkpoint(
+                str(out_dir / 'checkpoint-baseline.pth'),
+                model_without_ddp, optimizer, loss_scaler, -1, args, dem_norm
+            )
+
+            if baseline_is_finite:
+                _save_checkpoint(
+                    str(out_dir / 'checkpoint-best.pth'),
+                    model_without_ddp, optimizer, loss_scaler,
+                    -1, args, dem_norm
+                )
+
+            baseline_summary = {
+                'baseline_epoch': -1,
+                'optimizer_updates_before_evaluation': 0,
+                'best_metric': best_metric_name,
+                'baseline_metric_value': baseline_metric,
+                'checkpoint_baseline': str(
+                    out_dir / 'checkpoint-baseline.pth'
+                ),
+                'checkpoint_best_initialized_from_baseline': baseline_is_finite,
+                'validation_stats': baseline_stats,
+            }
+            save_json(
+                baseline_summary,
+                str(out_dir / 'baseline_summary.json')
+            )
+            save_json(
+                {
+                    'best_metric': best_metric_name,
+                    'best_metric_value': best_val,
+                    'best_epoch': best_epoch,
+                    'source': 'baseline_before_training',
+                },
+                str(best_summary_path)
+            )
+
+            with open(out_dir / 'log.txt', 'a', encoding='utf-8') as f:
+                f.write(json.dumps({
+                    'epoch': -1,
+                    'phase': 'baseline_before_training',
+                    'optimizer_updates_before_evaluation': 0,
+                    'train': None,
+                    'val': baseline_stats,
+                    'best_metric': best_metric_name,
+                    'best_metric_value': best_val,
+                    'best_epoch': best_epoch,
+                }) + '\n')
+
+            history = [
+                r for r in history
+                if int(r.get('epoch', -999999)) != -1
+            ]
+            history.append(_baseline_history_row(baseline_stats))
+            history.sort(key=lambda r: int(r.get('epoch', 0)))
+            _save_history(
+                history_csv, history, _history_fieldnames()
+            )
+            if not args.no_plot_curves:
+                _maybe_plot_curves(
+                    history, out_dir, plot_rmse=bool(args.eval_rmse)
+                )
+
+        print(
+            f"[BASELINE-DONE] {best_metric_name}={baseline_metric:.6f}; "
+            f"checkpoint-best initialized={baseline_is_finite} at epoch=-1"
+        )
+    elif args.baseline_eval_before_training:
+        print(
+            f"[BASELINE] skipped because start_epoch={args.start_epoch}; "
+            "this is a resumed run."
+        )
+    else:
+        print("[BASELINE] disabled by command-line option.")
+
+    start_time = time.time()
+    for epoch in range(args.start_epoch, args.epochs):
+        if args.distributed:
+            train_sampler.set_epoch(epoch)
+
+        train_stats = train_one_epoch(
+            model, train_loader, optimizer, device, epoch, loss_scaler,
+            log_writer=log_writer, args=args
+        )
+
+        val_stats = evaluate_one_epoch(
+            model, val_loader, device, epoch, log_writer=log_writer, args=args, prefix='val'
+        )
+
+        # ---- visualization (every N epochs; FIXED tiles; GeoTIFF) ----
+        if (misc.is_main_process() and args.vis_every > 0 and (epoch % args.vis_every == 0)
+            and (train_vis_idxs is not None) and (val_vis_idxs is not None)):
+            visualize_fixed_tiles_geotiff(model_without_ddp, train_vis_ds, train_vis_idxs, device, epoch, args, out_dir, split_name="train")
+            visualize_fixed_tiles_geotiff(model_without_ddp, val_vis_ds,   val_vis_idxs,   device, epoch, args, out_dir, split_name="val")
+                    
+        val_loss = float(val_stats.get('loss', float('inf')))
+
+        # metric used for selecting checkpoint-best
+        best_metric_name, val_best_metric = _selected_val_metric(
+            val_stats, best_metric_name
+        )
+
+        # ---- epoch-level tensorboard (clean curves) ----
+        if log_writer is not None and misc.is_main_process():
+            log_writer.add_scalar('epoch/train_loss', float(train_stats.get('loss', float('nan'))), epoch)
+            log_writer.add_scalar('epoch/val_loss', val_loss, epoch)
+            log_writer.add_scalar('epoch/train_mae_m_mask', float(train_stats.get('mae_m_mask', float('nan'))), epoch)
+            log_writer.add_scalar('epoch/val_mae_m_mask', float(val_stats.get('mae_m_mask', float('nan'))), epoch)
+            log_writer.add_scalar('epoch/train_normalized_mse_mask', float(train_stats.get('normalized_mse_mask', float('nan'))), epoch)
+            log_writer.add_scalar('epoch/val_normalized_mse_mask', float(val_stats.get('normalized_mse_mask', float('nan'))), epoch)
+            if args.eval_rmse:
+                log_writer.add_scalar('epoch/train_rmse_m_mask', float(train_stats.get('rmse_m_mask', float('nan'))), epoch)
+                log_writer.add_scalar('epoch/val_rmse_m_mask', float(val_stats.get('rmse_m_mask', float('nan'))), epoch)
+                log_writer.add_scalar('epoch/train_rmse_m_all', float(train_stats.get('rmse_m_all', float('nan'))), epoch)
+                log_writer.add_scalar('epoch/val_rmse_m_all', float(val_stats.get('rmse_m_all', float('nan'))), epoch)
+
+        # save checkpoints
+        if misc.is_main_process():
+            _save_checkpoint(str(out_dir / f'checkpoint-{epoch:04d}.pth'), model_without_ddp, optimizer, loss_scaler, epoch, args, dem_norm)
+
+            if val_best_metric < best_val:
+                best_val = val_best_metric
+                best_epoch = epoch
+                _save_checkpoint(
+                    str(out_dir / 'checkpoint-best.pth'),
+                    model_without_ddp, optimizer, loss_scaler,
+                    epoch, args, dem_norm
+                )
+                save_json(
+                    {
+                        'best_metric': best_metric_name,
+                        'best_metric_value': best_val,
+                        'best_epoch': best_epoch,
+                        'source': 'training_epoch',
+                    },
+                    str(best_summary_path)
+                )
+                print(
+                    f"[BEST] New best {best_metric_name}={best_val:.6f} "
+                    f"at epoch={best_epoch}"
+                )
+
+            with open(out_dir / 'log.txt', 'a', encoding='utf-8') as f:
+                f.write(json.dumps({
+                    'epoch': epoch,
+                    'train': train_stats,
+                    'val': val_stats,
+                    'best_metric': best_metric_name,
+                    'best_metric_value': best_val,
+                    'best_epoch': best_epoch,
+                }) + '\n')
+
+            # ---- update history.csv (epoch-level) ----
+            row = {
+                'epoch': float(epoch),
+                'train_loss': float(train_stats.get('loss', float('nan'))),
+                'val_loss': float(val_stats.get('loss', float('nan'))),
+                'train_mae_m_mask': float(train_stats.get('mae_m_mask', float('nan'))),
+                'val_mae_m_mask': float(val_stats.get('mae_m_mask', float('nan'))),
+                'train_normalized_mse_mask': float(train_stats.get('normalized_mse_mask', float('nan'))),
+                'val_normalized_mse_mask': float(val_stats.get('normalized_mse_mask', float('nan'))),
+                'train_supervised_pixel_count': float(train_stats.get('supervised_pixel_count', float('nan'))),
+                'val_supervised_pixel_count': float(val_stats.get('supervised_pixel_count', float('nan'))),
+                'lr': float(train_stats.get('lr', float('nan'))),
+            }
+
+            if args.eval_rmse:
+                nan = float('nan')
+                row.update({
+                    'train_rmse_m_mask': float(train_stats.get('rmse_m_mask', nan)),
+                    'val_rmse_m_mask': float(val_stats.get('rmse_m_mask', nan)),
+                    'train_rmse_m_all': float(train_stats.get('rmse_m_all', nan)),
+                    'val_rmse_m_all': float(val_stats.get('rmse_m_all', nan)),
+
+                    # train_one_epoch 没算这些 -> 填 nan，方便画“只有 val 线”的曲线
+                    'train_rmse_m_mask_viscorr': nan,
+                    'train_rmse_m_all_viscorr': nan,
+                    'train_bias_m_vis_med': nan,
+
+                    'val_rmse_m_mask_viscorr': float(val_stats.get('rmse_m_mask_viscorr', nan)),
+                    'val_rmse_m_all_viscorr': float(val_stats.get('rmse_m_all_viscorr', nan)),
+                    'val_bias_m_vis_med': float(val_stats.get('bias_m_vis_med', nan)),
+                    'train_actual_mask_ratio': float(train_stats.get('actual_mask_ratio', nan)),
+                    'val_actual_mask_ratio': float(val_stats.get('actual_mask_ratio', nan)),
+                    'train_actual_prediction_mask_ratio': float(train_stats.get('actual_prediction_mask_ratio', nan)),
+                    'val_actual_prediction_mask_ratio': float(val_stats.get('actual_prediction_mask_ratio', nan)),
+                })
+    
+            # replace existing epoch row if present (safe for resume)
+            history = [r for r in history if int(r.get('epoch', -1)) != epoch]
+            history.append(row)
+            history.sort(key=lambda r: int(r.get('epoch', 0)))
+
+            _save_history(
+                history_csv, history, _history_fieldnames()
+            )
+
+            # ---- plot curves (best-effort) ----
+            if (not args.no_plot_curves) and (args.plot_every > 0) and (epoch % args.plot_every == 0):
+                _maybe_plot_curves(history, out_dir, plot_rmse=bool(args.eval_rmse))
+
+        # ---- optional early stopping ----
+        if args.early_stop_patience and args.early_stop_patience > 0:
+            metric_name = args.early_stop_metric
+            if metric_name == 'val_loss':
+                cur = float(val_stats.get('loss', float('inf')))
+            else:
+                # val_stats uses keys such as mae_m_mask / rmse_m_mask / rmse_m_all
+                cur = float(val_stats.get(metric_name.replace('val_', ''), float('inf')))
+                if not np.isfinite(cur):
+                    cur = float(val_stats.get('loss', float('inf')))
+                    metric_name = 'val_loss'
+
+            # Activate early-stop only after:
+            #   1) warmup epochs are finished, AND
+            #   2) (optional) metric reaches a target threshold, e.g., RMSE <= threshold
+            warmup_ok = epoch >= int(getattr(args, 'early_stop_warmup_epochs', 0) or 0)
+            thr = float(getattr(args, 'early_stop_start_threshold', 0.0) or 0.0)
+            thr_ok = True
+            if thr > 0:
+                thr_ok = cur <= thr
+
+            if not es_activated:
+                if warmup_ok and thr_ok:
+                    es_activated = True
+                    # Preserve a better baseline/restored metric as the
+                    # early-stop reference instead of replacing it.
+                    if np.isfinite(best_metric):
+                        if cur < best_metric - float(args.early_stop_min_delta):
+                            best_metric = cur
+                            bad_epochs = 0
+                        else:
+                            bad_epochs = 1
+                    else:
+                        best_metric = cur
+                        bad_epochs = 0
+                    if misc.is_main_process():
+                        reference = (
+                            f"reference_best={best_metric:.4f}, "
+                            f"bad_epochs={bad_epochs}"
+                        )
+                        if thr > 0:
+                            print(
+                                f"[EARLY-STOP] Activated at epoch={epoch} "
+                                f"(metric={metric_name}={cur:.4f} <= {thr}; "
+                                f"{reference})."
+                            )
+                        else:
+                            print(
+                                f"[EARLY-STOP] Activated at epoch={epoch} "
+                                f"(metric={metric_name}={cur:.4f}; "
+                                f"{reference})."
+                            )
+                else:
+                    # Not activated yet: do not accumulate patience.
+                    pass
+            else:
+                if cur < best_metric - float(args.early_stop_min_delta):
+                    best_metric = cur
+                    bad_epochs = 0
+                else:
+                    bad_epochs += 1
+                    if bad_epochs >= int(args.early_stop_patience):
+                        if misc.is_main_process():
+                            print(f"[EARLY-STOP] No improvement in {metric_name} for {bad_epochs} epochs. Stop at epoch={epoch}. best={best_metric:.4f}")
+                        break
+
+    total_time = time.time() - start_time
+    total_time_str = str(datetime.timedelta(seconds=int(total_time)))
+    if misc.is_main_process():
+        print(
+            f"Training time {total_time_str}; best_epoch={best_epoch} "
+            f"best_{best_metric_name}={best_val:.6f} "
+            "(epoch=-1 means untouched pre-training baseline)"
+        )
+
+    # ---- final evaluations (optional) ----
+    def _maybe_eval(split_name: str, dir_path: str, list_path: str, out_tag: str):
+        if not dir_path and not list_path:
+            return                
+        if use_lcc:
+            lcc_list_path = ''
+            if out_tag == 'test':
+                lcc_list_path = args.test_lcc_list
+            ds = DEMLCCPairDataset(
+                dem_dir=dir_path if dir_path else '',
+                lcc_dir=args.lcc_mask_path if args.lcc_mask_path else '',
+                dem_list_path=list_path if list_path else None,
+                lcc_list_path=lcc_list_path if lcc_list_path else None,
+                input_size=args.input_size,
+                nodata=args.nodata,
+                nodata_threshold=args.nodata_threshold,
+                random_flip=False,
+                return_path=False,
+                tile_norm=args.tile_norm,
+                tile_norm_eps=args.tile_norm_eps,
+                tile_norm_std_scale=args.tile_norm_std_scale,
+                return_meta=True,
+                tile_norm_visible_only=args.tile_norm_visible_only,
+                min_lcc_patch_ratio=args.min_lcc_patch_ratio,
+                max_lcc_patch_ratio=args.max_lcc_patch_ratio,
+                min_valid_visible_patch_ratio=args.min_valid_visible_patch_ratio,
+                loss_region_mode=args.loss_region_mode,
+                core_patch_radius=args.core_patch_radius,
+                min_core_valid_patch_ratio=args.min_core_valid_patch_ratio,
+                min_core_prediction_patch_ratio=args.min_core_prediction_patch_ratio,
+                max_core_prediction_patch_ratio=args.max_core_prediction_patch_ratio,
+                patch_size=16,
+                lcc_patch_threshold=args.lcc_patch_threshold,
+            )
+        else:
+            ds = DEMTileDataset(
+                dir_path=dir_path if dir_path else None,
+                list_path=list_path if list_path else None,
+                input_size=args.input_size,
+                nodata=args.nodata,
+                nodata_threshold=args.nodata_threshold,
+                random_flip=False,
+                return_path=False,
+                tile_norm=args.tile_norm,
+                tile_norm_eps=args.tile_norm_eps,
+                tile_norm_std_scale=args.tile_norm_std_scale,
+                return_meta=True,
+            )
+        # apply same TRAIN normalization
+        if args.norm_method == 'meanstd':
+            ds.set_norm(args.norm_mean, args.norm_std)
+        else:
+            ds.set_norm(float(dem_norm['min']), float(dem_norm['max']), method='minmax')
+
+        if args.distributed:
+            sampler = torch.utils.data.DistributedSampler(ds, num_replicas=misc.get_world_size(), rank=misc.get_rank(), shuffle=False)
+        else:
+            sampler = torch.utils.data.SequentialSampler(ds)
+
+        loader = torch.utils.data.DataLoader(ds, sampler=sampler, batch_size=args.batch_size,
+                                             num_workers=args.num_workers, pin_memory=args.pin_mem, drop_last=False)
+        stats = evaluate_one_epoch(model, loader, device, epoch=args.epochs, log_writer=None, args=args, prefix=out_tag)
+        if misc.is_main_process():
+            save_json(stats, str(out_dir / f'eval_{out_tag}.json'))
+            print(f"[EVAL] {split_name} -> {stats}")
+
+    # test (optional; if you don't pass test_dir/test_list, this does nothing)
+    _maybe_eval('test', test_dir if os.path.isdir(test_dir) else '', args.test_list, 'test')
+
+    # KY holdout or any extra (optional)
+    if args.extra_eval_dir and os.path.isdir(args.extra_eval_dir):
+        _maybe_eval('extra', args.extra_eval_dir, '', 'extra')
+
+if __name__ == '__main__':
+    parser = argparse.ArgumentParser('MAE pre-training (DEM GeoTIFF)', parents=[get_args_parser()])
+    args = parser.parse_args()
+    Path(args.output_dir).mkdir(parents=True, exist_ok=True)
+    main(args)

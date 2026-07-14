@@ -1,0 +1,144 @@
+#!/usr/bin/env bash
+#SBATCH -J F061_meter_fullriver
+#SBATCH -p HydroIntel
+#SBATCH -w execute-4006
+#SBATCH -N 1
+#SBATCH -n 1
+#SBATCH -c 8
+#SBATCH --mem=64G
+#SBATCH -t 1-00:00:00
+#SBATCH --chdir=/tank/data/SFS/xinyis/data/bathymetry/MAE-Topography
+
+set -euo pipefail
+
+ROOT=${ROOT:-/tank/data/SFS/xinyis/data/bathymetry/MAE-Topography}
+WORK=${WORK:-$ROOT/Downstream_Task_Bathy}
+CODE=${CODE:-$ROOT/mae_Retrain}
+SCRIPT=${SCRIPT:-$WORK/script/F060_fullriver_predict_tileavg_vrt_MeterMAE_CoreFinalLossOnly_Inst1DSafe_20260713.py}
+MODEL_CV_ROOT=${MODEL_CV_ROOT:-$WORK/cross_validation_v4_meterMAE_BaselineEval}
+RUN_TAG=${RUN_TAG:-D003MeterMAE_BaselineEval_D001NoDataSafe}
+
+TILE_ROOT=${TILE_ROOT:-/tank/data/SFS/xinyis/data/bathymetry/Processed_Results/Tiles_for_MAE_FullRiver_E001/Tiles_1m}
+OUT_BASE=${OUT_BASE:-/tank/data/SFS/xinyis/data/bathymetry/Processed_Results/FullRiver_Predictions_F060_TileAvgVRT_D003MeterMAE_BaselineEval_D001NoDataSafe}
+
+HOLDOUT_PRESET=${HOLDOUT_PRESET:-CO}
+RIVERS=${RIVERS:-}
+GPU_ID=${GPU_ID:-0}
+BATCH_SIZE=${BATCH_SIZE:-4}
+STD_SCALE=${STD_SCALE:-1.5}
+USE_AMP=${USE_AMP:-1}
+OVERWRITE=${OVERWRITE:-0}
+RESUME=${RESUME:-1}
+RUN_DIR=${RUN_DIR:-}
+CKPT=${CKPT:-}
+OUT_DIR=${OUT_DIR:-}
+
+RUNTIME_LOG_DIR="$MODEL_CV_ROOT/logs"
+mkdir -p "$RUNTIME_LOG_DIR"
+RUNTIME_JOB_ID=${SLURM_JOB_ID:-local_$$}
+exec >"$RUNTIME_LOG_DIR/F061_meter_fullriver_${HOLDOUT_PRESET}_${RUNTIME_JOB_ID}.out" \
+     2>"$RUNTIME_LOG_DIR/F061_meter_fullriver_${HOLDOUT_PRESET}_${RUNTIME_JOB_ID}.err"
+
+safe_name() { echo "$1" | sed 's/[^A-Za-z0-9_]/_/g'; }
+latest_run_with_ckpt() {
+  local parent="$1"
+  if [[ ! -d "$parent" ]]; then echo ""; return 0; fi
+  find "$parent" -mindepth 2 -maxdepth 2 -type f -name checkpoint-best.pth -printf '%T@ %h\n' 2>/dev/null \
+    | sort -nr | awk 'NR==1{print $2}'
+}
+
+case "$HOLDOUT_PRESET" in
+  CO) DEFAULT_RIVERS="CO_UpperColorado_Topobathy_1_2020" ;;
+  CA) DEFAULT_RIVERS="CA_KlamathRiver_TopoBathy_2018_D18" ;;
+  Santiam) DEFAULT_RIVERS="OR_SantiamRiverTB_Topobathy_1_D23" ;;
+  NE) DEFAULT_RIVERS="NE_Niobrara_Topobathy_2018" ;;
+  OR_MKRC) DEFAULT_RIVERS="OR_MKRC_Topobathy_2021" ;;
+  Nisqually) DEFAULT_RIVERS="WA_Nisqually_Bathymetric_2020" ;;
+  MD) DEFAULT_RIVERS="MD_PotomacRiver_Bathy_2019" ;;
+  Chehalis) DEFAULT_RIVERS="WA_ChehalisRiverTB_Topobathy_1_D23" ;;
+  MilwaukeeGroup) DEFAULT_RIVERS="BadgerFinNull Estabrook_Combined KewaFix2Null Kletzch_Combined_UpMax3Null" ;;
+  *) echo "[ERROR] Unknown HOLDOUT_PRESET=$HOLDOUT_PRESET" >&2; exit 2 ;;
+esac
+RIVERS=${RIVERS:-$DEFAULT_RIVERS}
+
+SAFE_PRESET=$(safe_name "$HOLDOUT_PRESET")
+RUN_PARENT="$MODEL_CV_ROOT/runs/holdout_${SAFE_PRESET}_${RUN_TAG}"
+if [[ -z "$RUN_DIR" ]]; then RUN_DIR=$(latest_run_with_ckpt "$RUN_PARENT"); fi
+if [[ -z "$RUN_DIR" ]]; then
+  echo "[ERROR] Could not find checkpoint-best.pth under $RUN_PARENT" >&2
+  exit 2
+fi
+CKPT=${CKPT:-$RUN_DIR/checkpoint-best.pth}
+OUT_DIR=${OUT_DIR:-$OUT_BASE/holdout_${SAFE_PRESET}_${RUN_TAG}}
+
+module purge || true
+source /home/uwm/zequnlin/miniconda3/etc/profile.d/conda.sh
+conda activate "$ROOT/conda_envs/mae_zequn"
+
+export LD_LIBRARY_PATH="$CONDA_PREFIX/lib:$CONDA_PREFIX/lib/python3.12/site-packages/torch/lib:${LD_LIBRARY_PATH:-}"
+export CUDA_DEVICE_ORDER=PCI_BUS_ID
+export CUDA_VISIBLE_DEVICES="$GPU_ID"
+export PYTORCH_CUDA_ALLOC_CONF=${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}
+export OMP_NUM_THREADS=${SLURM_CPUS_PER_TASK:-8}
+export MKL_NUM_THREADS=${SLURM_CPUS_PER_TASK:-8}
+export PYTHONPATH="$CODE${PYTHONPATH:+:$PYTHONPATH}"
+
+for f in \
+  "$SCRIPT" "$CKPT" \
+  "$TILE_ROOT/FullRiver_tile" "$TILE_ROOT/Hidden_Mask" \
+  "$TILE_ROOT/Loss_Mask_Pixel" "$TILE_ROOT/Core_Loss_Mask_Pixel"; do
+  [[ -e "$f" ]] || { echo "[ERROR] Missing required path: $f" >&2; exit 2; }
+done
+
+if [[ -d "$OUT_DIR" ]] && find "$OUT_DIR" -mindepth 1 -print -quit | grep -q .; then
+  if [[ "$OVERWRITE" == "1" ]]; then
+    rm -rf "$OUT_DIR"
+  elif [[ "$RESUME" == "1" || "$RESUME" == "true" || "$RESUME" == "TRUE" ]]; then
+    echo "[RESUME] $OUT_DIR"
+  else
+    echo "[ERROR] Output is not empty: $OUT_DIR" >&2
+    exit 3
+  fi
+fi
+mkdir -p "$OUT_DIR"
+
+AMP_ARGS=()
+[[ "$USE_AMP" == "1" || "$USE_AMP" == "true" || "$USE_AMP" == "TRUE" ]] && AMP_ARGS+=(--amp)
+RESUME_ARGS=()
+[[ "$RESUME" == "1" || "$RESUME" == "true" || "$RESUME" == "TRUE" ]] && RESUME_ARGS+=(--resume)
+
+read -r -a RIVER_ARRAY <<< "$RIVERS"
+[[ ${#RIVER_ARRAY[@]} -gt 0 ]] || { echo "[ERROR] RIVERS is empty." >&2; exit 2; }
+
+echo "============================================================"
+echo "F061 v4 meter-MAE full-river inference"
+date
+echo "JOB=${SLURM_JOB_ID:-local}"
+echo "HOLDOUT_PRESET=$HOLDOUT_PRESET"
+echo "RUN_DIR=$RUN_DIR"
+echo "CKPT=$CKPT"
+echo "OUT_DIR=$OUT_DIR"
+echo "RIVERS=$RIVERS"
+echo "FINAL_FOOTPRINT=Core_Loss_Mask_Pixel only"
+echo "OVERLAP=exact georeferenced pixel averaging"
+echo "============================================================"
+nvidia-smi || true
+
+python -u "$SCRIPT" \
+  --code_dir "$CODE" \
+  --ckpt "$CKPT" \
+  --tile_root "$TILE_ROOT" \
+  --output_dir "$OUT_DIR" \
+  --rivers "${RIVER_ARRAY[@]}" \
+  --batch_size "$BATCH_SIZE" \
+  --device cuda \
+  --tile_norm_std_scale "$STD_SCALE" \
+  --bottleneck_norm inst1d \
+  --loss_region_mode core \
+  --core_patch_radius 3 \
+  "${RESUME_ARGS[@]}" \
+  "${AMP_ARGS[@]}"
+
+echo "=== DONE F061 ==="
+echo "$OUT_DIR"
+date

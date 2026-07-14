@@ -1,0 +1,348 @@
+============================================================
+D026 holdout meter-MAE training
+Sun Jul 12 23:14:43 CDT 2026
+JOB=1793604
+HOST=execute-4006.mortimer.hpc.uwm.edu
+HOLDOUT_PRESET=CA
+HOLDOUT_NAME=CA_KlamathRiver_TopoBathy_2018_D18
+HOLDOUT_RIVERS=CA_KlamathRiver_TopoBathy_2018_D18
+SOURCE_SPLIT=/tank/data/SFS/xinyis/data/bathymetry/MAE-Topography/Downstream_Task_Bathy/cross_validation_v2/splits/holdout_CA_D001NoDataSafe
+SOURCE_SPLIT_TAG=D001NoDataSafe
+RUN_TAG=D002MeterMAE_D001NoDataSafe
+OUT_DIR=/tank/data/SFS/xinyis/data/bathymetry/MAE-Topography/Downstream_Task_Bathy/cross_validation_v3_meterMAE/runs/holdout_CA_D002MeterMAE_D001NoDataSafe/smoke_meterMAE_CA_CA_KlamathRiver_TopoBathy_2018_D18_v2_dualmask_meterMAE_corePixel_Best-val_mae_m_mask_e2_b4_acc4
+OPTIMIZATION_LOSS=meter_mae
+BEST_METRIC=val_mae_m_mask
+EARLY_STOP_METRIC=val_mae_m_mask
+EARLY_STOP_MIN_DELTA=0.001 m
+NOTE=Same D001NoDataSafe split as normalized-MSE experiment
+NOTE=All new outputs are isolated under cross_validation_v3_meterMAE
+============================================================
+Sun Jul 12 23:14:43 2026       
++-----------------------------------------------------------------------------------------+
+| NVIDIA-SMI 595.45.04              Driver Version: 595.45.04      CUDA Version: 13.2     |
++-----------------------------------------+------------------------+----------------------+
+| GPU  Name                 Persistence-M | Bus-Id          Disp.A | Volatile Uncorr. ECC |
+| Fan  Temp   Perf          Pwr:Usage/Cap |           Memory-Usage | GPU-Util  Compute M. |
+|                                         |                        |               MIG M. |
+|=========================================+========================+======================|
+|   0  NVIDIA L40S                    Off |   00000000:2A:00.0 Off |                    0 |
+| N/A   32C    P8             32W /  350W |       0MiB /  46068MiB |      0%      Default |
+|                                         |                        |                  N/A |
++-----------------------------------------+------------------------+----------------------+
+
++-----------------------------------------------------------------------------------------+
+| Processes:                                                                              |
+|  GPU   GI   CI              PID   Type   Process name                        GPU Memory |
+|        ID   ID                                                               Usage      |
+|=========================================================================================|
+|  No running processes found                                                             |
++-----------------------------------------------------------------------------------------+
+=== D025 MAE v2 dual-mask meter-MAE training backend ===
+HOST=execute-4006.mortimer.hpc.uwm.edu
+ROOT=/tank/data/SFS/xinyis/data/bathymetry/MAE-Topography
+CODE=/tank/data/SFS/xinyis/data/bathymetry/MAE-Topography/mae_Retrain
+TILE_ROOT=/tank/data/SFS/xinyis/data/bathymetry/Processed_Results/Tiles_for_MAE_v2/Tiles_1m
+SPLIT_DIR=/tank/data/SFS/xinyis/data/bathymetry/MAE-Topography/Downstream_Task_Bathy/cross_validation_v2/splits/holdout_CA_D001NoDataSafe
+RUN_NAME=smoke_meterMAE_CA_CA_KlamathRiver_TopoBathy_2018_D18_v2_dualmask_meterMAE_corePixel_Best-val_mae_m_mask_e2_b4_acc4
+OUT_DIR=/tank/data/SFS/xinyis/data/bathymetry/MAE-Topography/Downstream_Task_Bathy/cross_validation_v3_meterMAE/runs/holdout_CA_D002MeterMAE_D001NoDataSafe/smoke_meterMAE_CA_CA_KlamathRiver_TopoBathy_2018_D18_v2_dualmask_meterMAE_corePixel_Best-val_mae_m_mask_e2_b4_acc4
+LOG_DIR=/tank/data/SFS/xinyis/data/bathymetry/MAE-Topography/Downstream_Task_Bathy/cross_validation_v3_meterMAE/runs/holdout_CA_D002MeterMAE_D001NoDataSafe/smoke_meterMAE_CA_CA_KlamathRiver_TopoBathy_2018_D18_v2_dualmask_meterMAE_corePixel_Best-val_mae_m_mask_e2_b4_acc4/tb
+UP_CKPT=/tank/data/SFS/xinyis/data/bathymetry/MAE-Topography/Upstream_Model_ReTrain/runs/Small_tilenorm_viscorr_336/checkpoint-best.pth
+GPU_ID=0
+CUDA_VISIBLE_DEVICES=0
+BATCH_SIZE=4
+ACCUM_ITER=4
+EPOCHS=2
+LR=1e-4
+MIN_LR=1e-6
+PATIENCE=0
+NUM_WORKERS=1
+OPTIMIZATION_LOSS=meter_mae
+PRIMARY_OBJECTIVE=pixel-weighted absolute error in meters after inverse tile normalization
+SUPERVISION_REGION=Loss_Mask_Pixel AND prediction/core patch mask AND valid patch
+BEST_METRIC=val_mae_m_mask
+EARLY_STOP_METRIC=val_mae_m_mask
+EARLY_STOP_MIN_DELTA=0.001
+EARLY_STOP_WARMUP_EPOCHS=20
+BOTTLENECK_NORM=inst1d
+STD_SCALE=1.5
+NODATA=-999999
+NODATA_THRESHOLD=-9999
+MIN_VALID_VISIBLE_PATCH_RATIO=0.70
+LOSS_REGION_MODE=core
+CORE_PATCH_RADIUS=3
+MIN_CORE_VALID_PATCH_RATIO=0.85
+MIN_CORE_PREDICTION_PATCH_RATIO=0.02
+MAX_CORE_PREDICTION_PATCH_RATIO=0.90
+MIN_LOSS_PIXEL_COUNT=1
+FRESH_RUN=1
+=== Required-file checks ===
+=== Split counts ===
+   3038 /tank/data/SFS/xinyis/data/bathymetry/MAE-Topography/Downstream_Task_Bathy/cross_validation_v2/splits/holdout_CA_D001NoDataSafe/train_tiles.txt
+   3038 /tank/data/SFS/xinyis/data/bathymetry/MAE-Topography/Downstream_Task_Bathy/cross_validation_v2/splits/holdout_CA_D001NoDataSafe/train_hidden.txt
+   3038 /tank/data/SFS/xinyis/data/bathymetry/MAE-Topography/Downstream_Task_Bathy/cross_validation_v2/splits/holdout_CA_D001NoDataSafe/train_loss.txt
+   9114 total
+   2129 /tank/data/SFS/xinyis/data/bathymetry/MAE-Topography/Downstream_Task_Bathy/cross_validation_v2/splits/holdout_CA_D001NoDataSafe/val_tiles.txt
+   2129 /tank/data/SFS/xinyis/data/bathymetry/MAE-Topography/Downstream_Task_Bathy/cross_validation_v2/splits/holdout_CA_D001NoDataSafe/val_hidden.txt
+   2129 /tank/data/SFS/xinyis/data/bathymetry/MAE-Topography/Downstream_Task_Bathy/cross_validation_v2/splits/holdout_CA_D001NoDataSafe/val_loss.txt
+   6387 total
+=== Exact split SHA256 for cross-experiment comparison ===
+c8f5bfe6143580ada1206505d4ef821fcd589e32303c6fb4d558d0101cd7cc59  /tank/data/SFS/xinyis/data/bathymetry/MAE-Topography/Downstream_Task_Bathy/cross_validation_v2/splits/holdout_CA_D001NoDataSafe/train_tiles.txt
+d982b7f53eb8509ea5c4dc60c4c652943c13f222f6d112ef1859c7edd911aa4a  /tank/data/SFS/xinyis/data/bathymetry/MAE-Topography/Downstream_Task_Bathy/cross_validation_v2/splits/holdout_CA_D001NoDataSafe/val_tiles.txt
+c48a23b4f7db4890a50d17ec378302d899b8e15403402fc221ddd99ff3f0a684  /tank/data/SFS/xinyis/data/bathymetry/MAE-Topography/Downstream_Task_Bathy/cross_validation_v2/splits/holdout_CA_D001NoDataSafe/train_hidden.txt
+91782f59821545b91cd838b72bf3836497f53a1f4ed2af221f74451f4cb23075  /tank/data/SFS/xinyis/data/bathymetry/MAE-Topography/Downstream_Task_Bathy/cross_validation_v2/splits/holdout_CA_D001NoDataSafe/val_hidden.txt
+06edd90b7245e8c407f779768b1793b0666bc875b004943f2ac1e9cca8125f1a  /tank/data/SFS/xinyis/data/bathymetry/MAE-Topography/Downstream_Task_Bathy/cross_validation_v2/splits/holdout_CA_D001NoDataSafe/train_loss.txt
+15e796959b05df70751ca5a76592e1b87e9ae9e4c0d2cc1f83ee4a3c83511324  /tank/data/SFS/xinyis/data/bathymetry/MAE-Topography/Downstream_Task_Bathy/cross_validation_v2/splits/holdout_CA_D001NoDataSafe/val_loss.txt
+=== CUDA check ===
+/tank/data/SFS/xinyis/data/bathymetry/MAE-Topography/conda_envs/mae_zequn/bin/python
+torch 2.4.0 cuda? True count 1
+[GPU CHECK] device=0 name=NVIDIA L40S free=43.97 GiB total=44.39 GiB
+Sun Jul 12 23:14:47 2026       
++-----------------------------------------------------------------------------------------+
+| NVIDIA-SMI 595.45.04              Driver Version: 595.45.04      CUDA Version: 13.2     |
++-----------------------------------------+------------------------+----------------------+
+| GPU  Name                 Persistence-M | Bus-Id          Disp.A | Volatile Uncorr. ECC |
+| Fan  Temp   Perf          Pwr:Usage/Cap |           Memory-Usage | GPU-Util  Compute M. |
+|                                         |                        |               MIG M. |
+|=========================================+========================+======================|
+|   0  NVIDIA L40S                    Off |   00000000:2A:00.0 Off |                    0 |
+| N/A   34C    P0             52W /  350W |       0MiB /  46068MiB |      0%      Default |
+|                                         |                        |                  N/A |
++-----------------------------------------+------------------------+----------------------+
+
++-----------------------------------------------------------------------------------------+
+| Processes:                                                                              |
+|  GPU   GI   CI              PID   Type   Process name                        GPU Memory |
+|        ID   ID                                                               Usage      |
+|=========================================================================================|
+|  No running processes found                                                             |
++-----------------------------------------------------------------------------------------+
+[RESUME] FRESH_RUN=1. Ignoring checkpoints in OUT_DIR.
+False
+Not using distributed mode
+[23:14:54.462034] job dir: /tank/data/SFS/xinyis/data/bathymetry/MAE-Topography/mae_Retrain
+[23:14:54.462092] Namespace(data_root='/tank/data/SFS/xinyis/data/bathymetry/Processed_Results/Tiles_for_MAE_v2/Tiles_1m',
+train_dir='',
+val_dir='',
+test_dir='',
+train_list='/tank/data/SFS/xinyis/data/bathymetry/MAE-Topography/Downstream_Task_Bathy/cross_validation_v2/splits/holdout_CA_D001NoDataSafe/train_tiles.txt',
+val_list='/tank/data/SFS/xinyis/data/bathymetry/MAE-Topography/Downstream_Task_Bathy/cross_validation_v2/splits/holdout_CA_D001NoDataSafe/val_tiles.txt',
+test_list='',
+lcc_mask_path='',
+train_lcc_list='',
+val_lcc_list='',
+test_lcc_list='',
+hidden_mask_path='',
+loss_mask_path='',
+train_hidden_list='/tank/data/SFS/xinyis/data/bathymetry/MAE-Topography/Downstream_Task_Bathy/cross_validation_v2/splits/holdout_CA_D001NoDataSafe/train_hidden.txt',
+val_hidden_list='/tank/data/SFS/xinyis/data/bathymetry/MAE-Topography/Downstream_Task_Bathy/cross_validation_v2/splits/holdout_CA_D001NoDataSafe/val_hidden.txt',
+test_hidden_list='',
+train_loss_list='/tank/data/SFS/xinyis/data/bathymetry/MAE-Topography/Downstream_Task_Bathy/cross_validation_v2/splits/holdout_CA_D001NoDataSafe/train_loss.txt',
+val_loss_list='/tank/data/SFS/xinyis/data/bathymetry/MAE-Topography/Downstream_Task_Bathy/cross_validation_v2/splits/holdout_CA_D001NoDataSafe/val_loss.txt',
+test_loss_list='',
+min_loss_pixel_count=1,
+min_loss_pixel_ratio=0.0,
+min_core_loss_pixel_count=0,
+min_core_loss_pixel_ratio=0.0,
+lcc_mask_mode='exact',
+loss_on_lcc_only=False,
+lcc_priority=10.0,
+lcc_patch_threshold=0.5,
+tile_norm_visible_only=True,
+min_lcc_patch_ratio=0.0,
+max_lcc_patch_ratio=1.0,
+min_valid_visible_patch_ratio=0.7,
+loss_region_mode='core',
+core_patch_radius=3,
+min_core_valid_patch_ratio=0.85,
+min_core_prediction_patch_ratio=0.02,
+max_core_prediction_patch_ratio=0.9,
+extra_eval_dir='',
+input_size=336,
+in_chans=1,
+nodata=-999999.0,
+nodata_threshold=-9999.0,
+norm_method='meanstd',
+norm_json='',
+stats_max_files=1000,
+model='mae_vit_large_patch16',
+mask_ratio=0.75,
+norm_pix_loss=False,
+tile_norm=True,
+tile_norm_eps=0.001,
+tile_norm_std_scale=1.5,
+bottleneck_norm='inst1d',
+optimization_loss='meter_mae',
+loss_mode='mse',
+batch_size=4,
+epochs=2,
+accum_iter=4,
+weight_decay=0.05,
+lr=0.0001,
+blr=0.001,
+min_lr=1e-06,
+warmup_epochs=5,
+num_workers=1,
+pin_mem=True,
+eval_rmse=True,
+vis_every=20,
+vis_n=10,
+history_csv='',
+plot_every=1,
+no_plot_curves=False,
+early_stop_patience=0,
+early_stop_metric='val_mae_m_mask',
+early_stop_min_delta=0.001,
+early_stop_warmup_epochs=20,
+early_stop_start_threshold=0.0,
+best_metric='val_mae_m_mask',
+output_dir='/tank/data/SFS/xinyis/data/bathymetry/MAE-Topography/Downstream_Task_Bathy/cross_validation_v3_meterMAE/runs/holdout_CA_D002MeterMAE_D001NoDataSafe/smoke_meterMAE_CA_CA_KlamathRiver_TopoBathy_2018_D18_v2_dualmask_meterMAE_corePixel_Best-val_mae_m_mask_e2_b4_acc4',
+log_dir='/tank/data/SFS/xinyis/data/bathymetry/MAE-Topography/Downstream_Task_Bathy/cross_validation_v3_meterMAE/runs/holdout_CA_D002MeterMAE_D001NoDataSafe/smoke_meterMAE_CA_CA_KlamathRiver_TopoBathy_2018_D18_v2_dualmask_meterMAE_corePixel_Best-val_mae_m_mask_e2_b4_acc4/tb',
+device='cuda',
+seed=0,
+resume='',
+start_epoch=0,
+world_size=1,
+local_rank=-1,
+dist_on_itp=False,
+dist_url='env://',
+init_ckpt='/tank/data/SFS/xinyis/data/bathymetry/MAE-Topography/Upstream_Model_ReTrain/runs/Small_tilenorm_viscorr_336/checkpoint-best.pth',
+freeze_encoder=True,
+freeze_last_n_encoder_blocks=0,
+distributed=False)
+[23:14:54.473112] [DATA] Using MAE v2 dual masks: DEM + Hidden_Mask + Loss_Mask_Pixel. mode=exact, tile_norm=True, tile_norm_visible_only=True, tile_norm_std_scale=1.5, tile_norm_eps=0.001, nodata=-999999.0, nodata_threshold=-9999.0, min_valid_visible_patch_ratio=0.7, min_loss_pixel_count=1, min_loss_pixel_ratio=0.0, min_core_loss_pixel_count=0, min_core_loss_pixel_ratio=0.0
+[23:16:15.077270] [DEMDualMaskDataset] matched triples: 3038
+[23:17:09.209350] [DEMDualMaskDataset] matched triples: 2129
+[23:17:23.678357] [DEMDualMaskDataset] matched triples: 3038
+[23:17:33.514211] [DEMDualMaskDataset] matched triples: 2129
+[23:17:37.973708] [NORM] computed from train split and saved to: /tank/data/SFS/xinyis/data/bathymetry/MAE-Topography/Downstream_Task_Bathy/cross_validation_v3_meterMAE/runs/holdout_CA_D002MeterMAE_D001NoDataSafe/smoke_meterMAE_CA_CA_KlamathRiver_TopoBathy_2018_D18_v2_dualmask_meterMAE_corePixel_Best-val_mae_m_mask_e2_b4_acc4/norm_stats_train.json
+[23:17:37.973738] [OBJECTIVE] optimization_loss= meter_mae
+[23:17:37.973746] [OBJECTIVE] pixel-weighted MAE in meters after inverse tile normalization
+[23:17:37.973751] [OBJECTIVE] exact region = Loss_Mask_Pixel AND prediction/core patch mask AND valid patch
+[23:17:40.803610] base_lr: 1.00e-03
+[23:17:40.803643] actual_lr: 1.00e-04
+[23:17:40.803649] effective_batch_size: 16
+[23:18:09.922869] [INIT_CKPT] loaded from /tank/data/SFS/xinyis/data/bathymetry/MAE-Topography/Upstream_Model_ReTrain/runs/Small_tilenorm_viscorr_336/checkpoint-best.pth
+[23:18:09.922911] [INIT_CKPT] missing_keys=[]
+[23:18:09.922917] [INIT_CKPT] unexpected_keys=[]
+[23:18:09.924252] [FREEZE] total params=329,133,312, trainable params=25,876,736
+[23:18:10.066406] log_dir: /tank/data/SFS/xinyis/data/bathymetry/MAE-Topography/Downstream_Task_Bathy/cross_validation_v3_meterMAE/runs/holdout_CA_D002MeterMAE_D001NoDataSafe/smoke_meterMAE_CA_CA_KlamathRiver_TopoBathy_2018_D18_v2_dualmask_meterMAE_corePixel_Best-val_mae_m_mask_e2_b4_acc4/tb
+[23:18:13.985160] Epoch: [0]  [  0/759]  eta: 0:49:30  lr: 0.000000  loss: 2.0362 (2.0362)  mae_m_mask: 2.0362 (2.0362)  rmse_m_mask: 2.2410 (2.2410)  normalized_mse_mask: 4.2305 (4.2305)  rmse_m_all: 1.0628 (1.0628)  actual_mask_ratio: 0.0767 (0.0767)  actual_prediction_mask_ratio: 0.2631 (0.2631)  ignored_patch_ratio: 0.0176 (0.0176)  time: 3.9137  data: 0.4826  max mem: 1588
+[23:18:15.340129] Epoch: [0]  [ 20/759]  eta: 0:03:05  lr: 0.000001  loss: 2.0215 (2.3109)  mae_m_mask: 2.0215 (2.3109)  rmse_m_mask: 2.3750 (2.8555)  normalized_mse_mask: 0.9909 (1.5296)  rmse_m_all: 2.8983 (3.0047)  actual_mask_ratio: 0.0726 (0.0740)  actual_prediction_mask_ratio: 0.2426 (0.2453)  ignored_patch_ratio: 0.0000 (0.0018)  time: 0.0677  data: 0.0001  max mem: 1900
+[23:18:16.148449] Epoch: [0]  [ 40/759]  eta: 0:01:46  lr: 0.000001  loss: 1.7720 (2.1553)  mae_m_mask: 1.7720 (2.1553)  rmse_m_mask: 2.1122 (2.6501)  normalized_mse_mask: 1.1866 (1.4635)  rmse_m_all: 3.4264 (3.2512)  actual_mask_ratio: 0.0731 (0.0727)  actual_prediction_mask_ratio: 0.2392 (0.2415)  ignored_patch_ratio: 0.0000 (0.0033)  time: 0.0404  data: 0.0001  max mem: 1900
+[23:18:17.012939] Epoch: [0]  [ 60/759]  eta: 0:01:19  lr: 0.000002  loss: 1.6153 (2.0548)  mae_m_mask: 1.6153 (2.0548)  rmse_m_mask: 2.0129 (2.5659)  normalized_mse_mask: 0.5932 (1.3658)  rmse_m_all: 2.8741 (3.1952)  actual_mask_ratio: 0.0686 (0.0715)  actual_prediction_mask_ratio: 0.2347 (0.2385)  ignored_patch_ratio: 0.0000 (0.0025)  time: 0.0432  data: 0.0001  max mem: 1900
+[23:18:17.876628] Epoch: [0]  [ 80/759]  eta: 0:01:05  lr: 0.000002  loss: 1.8096 (2.0372)  mae_m_mask: 1.8096 (2.0372)  rmse_m_mask: 2.1540 (2.5554)  normalized_mse_mask: 1.2842 (1.4424)  rmse_m_all: 2.8847 (3.1952)  actual_mask_ratio: 0.0723 (0.0715)  actual_prediction_mask_ratio: 0.2358 (0.2386)  ignored_patch_ratio: 0.0000 (0.0032)  time: 0.0432  data: 0.0001  max mem: 1900
+[23:18:18.737962] Epoch: [0]  [100/759]  eta: 0:00:56  lr: 0.000003  loss: 1.2871 (1.9542)  mae_m_mask: 1.2871 (1.9542)  rmse_m_mask: 1.5574 (2.4671)  normalized_mse_mask: 0.8812 (1.3668)  rmse_m_all: 2.1990 (3.0409)  actual_mask_ratio: 0.0703 (0.0716)  actual_prediction_mask_ratio: 0.2392 (0.2387)  ignored_patch_ratio: 0.0000 (0.0033)  time: 0.0430  data: 0.0001  max mem: 1900
+[23:18:19.601331] Epoch: [0]  [120/759]  eta: 0:00:50  lr: 0.000003  loss: 1.3789 (1.8896)  mae_m_mask: 1.3789 (1.8896)  rmse_m_mask: 1.8278 (2.4022)  normalized_mse_mask: 0.6699 (1.3084)  rmse_m_all: 2.5025 (2.9999)  actual_mask_ratio: 0.0680 (0.0712)  actual_prediction_mask_ratio: 0.2313 (0.2370)  ignored_patch_ratio: 0.0000 (0.0033)  time: 0.0431  data: 0.0001  max mem: 1900
+[23:18:20.428869] Epoch: [0]  [140/759]  eta: 0:00:45  lr: 0.000004  loss: 1.6340 (1.8821)  mae_m_mask: 1.6340 (1.8821)  rmse_m_mask: 2.2850 (2.4048)  normalized_mse_mask: 0.6191 (1.2290)  rmse_m_all: 2.7845 (3.0282)  actual_mask_ratio: 0.0709 (0.0715)  actual_prediction_mask_ratio: 0.2404 (0.2369)  ignored_patch_ratio: 0.0000 (0.0030)  time: 0.0414  data: 0.0001  max mem: 1900
+[23:18:21.235933] Epoch: [0]  [160/759]  eta: 0:00:41  lr: 0.000004  loss: 1.7946 (1.8676)  mae_m_mask: 1.7946 (1.8676)  rmse_m_mask: 2.1593 (2.3860)  normalized_mse_mask: 0.5305 (1.1994)  rmse_m_all: 2.6363 (3.0164)  actual_mask_ratio: 0.0703 (0.0712)  actual_prediction_mask_ratio: 0.2307 (0.2358)  ignored_patch_ratio: 0.0000 (0.0027)  time: 0.0403  data: 0.0001  max mem: 1900
+[23:18:22.039862] Epoch: [0]  [180/759]  eta: 0:00:38  lr: 0.000005  loss: 1.3398 (1.8315)  mae_m_mask: 1.3398 (1.8315)  rmse_m_mask: 1.6470 (2.3356)  normalized_mse_mask: 0.8615 (1.1991)  rmse_m_all: 2.5598 (2.9591)  actual_mask_ratio: 0.0697 (0.0711)  actual_prediction_mask_ratio: 0.2307 (0.2350)  ignored_patch_ratio: 0.0000 (0.0026)  time: 0.0402  data: 0.0001  max mem: 1900
+[23:18:22.892075] Epoch: [0]  [200/759]  eta: 0:00:35  lr: 0.000005  loss: 1.2098 (1.7834)  mae_m_mask: 1.2098 (1.7834)  rmse_m_mask: 1.4653 (2.2707)  normalized_mse_mask: 1.1016 (1.2346)  rmse_m_all: 2.3596 (2.9209)  actual_mask_ratio: 0.0686 (0.0710)  actual_prediction_mask_ratio: 0.2228 (0.2341)  ignored_patch_ratio: 0.0000 (0.0026)  time: 0.0426  data: 0.0001  max mem: 1900
+[23:18:23.739976] Epoch: [0]  [220/759]  eta: 0:00:33  lr: 0.000006  loss: 1.1479 (1.7522)  mae_m_mask: 1.1479 (1.7522)  rmse_m_mask: 1.4567 (2.2319)  normalized_mse_mask: 0.3115 (1.1816)  rmse_m_all: 2.6213 (2.9191)  actual_mask_ratio: 0.0731 (0.0712)  actual_prediction_mask_ratio: 0.2347 (0.2346)  ignored_patch_ratio: 0.0000 (0.0025)  time: 0.0424  data: 0.0001  max mem: 1900
+[23:18:24.544581] Epoch: [0]  [240/759]  eta: 0:00:31  lr: 0.000006  loss: 1.0473 (1.7188)  mae_m_mask: 1.0473 (1.7188)  rmse_m_mask: 1.3284 (2.1896)  normalized_mse_mask: 0.5135 (1.1379)  rmse_m_all: 2.0338 (2.8869)  actual_mask_ratio: 0.0726 (0.0713)  actual_prediction_mask_ratio: 0.2375 (0.2349)  ignored_patch_ratio: 0.0000 (0.0025)  time: 0.0402  data: 0.0001  max mem: 1900
+[23:18:25.393216] Epoch: [0]  [260/759]  eta: 0:00:29  lr: 0.000007  loss: 1.3016 (1.6902)  mae_m_mask: 1.3016 (1.6902)  rmse_m_mask: 1.6285 (2.1514)  normalized_mse_mask: 0.4174 (1.0978)  rmse_m_all: 2.7354 (2.8786)  actual_mask_ratio: 0.0731 (0.0715)  actual_prediction_mask_ratio: 0.2313 (0.2353)  ignored_patch_ratio: 0.0000 (0.0024)  time: 0.0424  data: 0.0001  max mem: 1900
+[23:18:26.233897] Epoch: [0]  [280/759]  eta: 0:00:27  lr: 0.000007  loss: 1.3139 (1.6782)  mae_m_mask: 1.3139 (1.6782)  rmse_m_mask: 1.6533 (2.1439)  normalized_mse_mask: 0.4277 (1.0623)  rmse_m_all: 2.4389 (2.8622)  actual_mask_ratio: 0.0726 (0.0715)  actual_prediction_mask_ratio: 0.2387 (0.2356)  ignored_patch_ratio: 0.0000 (0.0023)  time: 0.0420  data: 0.0001  max mem: 1900
+[23:18:27.080045] Epoch: [0]  [300/759]  eta: 0:00:25  lr: 0.000008  loss: 1.2916 (1.6658)  mae_m_mask: 1.2916 (1.6658)  rmse_m_mask: 1.5353 (2.1249)  normalized_mse_mask: 0.6218 (1.0591)  rmse_m_all: 2.3958 (2.8567)  actual_mask_ratio: 0.0726 (0.0716)  actual_prediction_mask_ratio: 0.2347 (0.2357)  ignored_patch_ratio: 0.0000 (0.0023)  time: 0.0423  data: 0.0001  max mem: 1900
+[23:18:27.943838] Epoch: [0]  [320/759]  eta: 0:00:24  lr: 0.000008  loss: 1.1362 (1.6495)  mae_m_mask: 1.1362 (1.6495)  rmse_m_mask: 1.5734 (2.1093)  normalized_mse_mask: 0.4098 (1.0362)  rmse_m_all: 2.6962 (2.8550)  actual_mask_ratio: 0.0731 (0.0717)  actual_prediction_mask_ratio: 0.2347 (0.2358)  ignored_patch_ratio: 0.0000 (0.0022)  time: 0.0432  data: 0.0001  max mem: 1900
+[23:18:28.806496] Epoch: [0]  [340/759]  eta: 0:00:23  lr: 0.000009  loss: 0.8588 (1.6075)  mae_m_mask: 0.8588 (1.6075)  rmse_m_mask: 1.1457 (2.0547)  normalized_mse_mask: 0.2467 (1.0050)  rmse_m_all: 2.1425 (2.8218)  actual_mask_ratio: 0.0731 (0.0718)  actual_prediction_mask_ratio: 0.2398 (0.2357)  ignored_patch_ratio: 0.0000 (0.0020)  time: 0.0431  data: 0.0001  max mem: 1900
+[23:18:29.644651] Epoch: [0]  [360/759]  eta: 0:00:21  lr: 0.000009  loss: 1.0509 (1.5768)  mae_m_mask: 1.0509 (1.5768)  rmse_m_mask: 1.2750 (2.0163)  normalized_mse_mask: 0.2826 (0.9759)  rmse_m_all: 2.5175 (2.8022)  actual_mask_ratio: 0.0692 (0.0717)  actual_prediction_mask_ratio: 0.2273 (0.2355)  ignored_patch_ratio: 0.0000 (0.0020)  time: 0.0419  data: 0.0001  max mem: 1900
+[23:18:30.454790] Epoch: [0]  [380/759]  eta: 0:00:20  lr: 0.000010  loss: 1.1036 (1.5567)  mae_m_mask: 1.1036 (1.5567)  rmse_m_mask: 1.5018 (1.9884)  normalized_mse_mask: 0.5361 (0.9613)  rmse_m_all: 2.3542 (2.7865)  actual_mask_ratio: 0.0737 (0.0718)  actual_prediction_mask_ratio: 0.2285 (0.2354)  ignored_patch_ratio: 0.0000 (0.0020)  time: 0.0405  data: 0.0001  max mem: 1900
+[23:18:31.261480] Epoch: [0]  [400/759]  eta: 0:00:18  lr: 0.000011  loss: 1.4078 (1.5529)  mae_m_mask: 1.4078 (1.5529)  rmse_m_mask: 1.7961 (1.9809)  normalized_mse_mask: 0.1822 (0.9528)  rmse_m_all: 2.4514 (2.7759)  actual_mask_ratio: 0.0686 (0.0717)  actual_prediction_mask_ratio: 0.2319 (0.2351)  ignored_patch_ratio: 0.0000 (0.0021)  time: 0.0403  data: 0.0001  max mem: 1900
+[23:18:32.065589] Epoch: [0]  [420/759]  eta: 0:00:17  lr: 0.000011  loss: 1.0363 (1.5317)  mae_m_mask: 1.0363 (1.5317)  rmse_m_mask: 1.4213 (1.9568)  normalized_mse_mask: 0.2979 (0.9259)  rmse_m_all: 1.9736 (2.7398)  actual_mask_ratio: 0.0771 (0.0719)  actual_prediction_mask_ratio: 0.2494 (0.2358)  ignored_patch_ratio: 0.0000 (0.0020)  time: 0.0402  data: 0.0001  max mem: 1900
+[23:18:32.874055] Epoch: [0]  [440/759]  eta: 0:00:16  lr: 0.000012  loss: 0.9957 (1.5092)  mae_m_mask: 0.9957 (1.5092)  rmse_m_mask: 1.3360 (1.9273)  normalized_mse_mask: 0.2290 (0.9081)  rmse_m_all: 1.9469 (2.7241)  actual_mask_ratio: 0.0731 (0.0720)  actual_prediction_mask_ratio: 0.2347 (0.2359)  ignored_patch_ratio: 0.0000 (0.0019)  time: 0.0404  data: 0.0001  max mem: 1900
+[23:18:33.681338] Epoch: [0]  [460/759]  eta: 0:00:15  lr: 0.000012  loss: 1.0051 (1.4880)  mae_m_mask: 1.0051 (1.4880)  rmse_m_mask: 1.3157 (1.9019)  normalized_mse_mask: 0.1546 (0.8898)  rmse_m_all: 1.9891 (2.7005)  actual_mask_ratio: 0.0709 (0.0719)  actual_prediction_mask_ratio: 0.2381 (0.2358)  ignored_patch_ratio: 0.0000 (0.0019)  time: 0.0403  data: 0.0001  max mem: 1900
+[23:18:34.486477] Epoch: [0]  [480/759]  eta: 0:00:14  lr: 0.000013  loss: 0.9295 (1.4707)  mae_m_mask: 0.9295 (1.4707)  rmse_m_mask: 1.3080 (1.8826)  normalized_mse_mask: 0.2916 (0.8751)  rmse_m_all: 1.8942 (2.6784)  actual_mask_ratio: 0.0720 (0.0720)  actual_prediction_mask_ratio: 0.2443 (0.2361)  ignored_patch_ratio: 0.0000 (0.0019)  time: 0.0402  data: 0.0001  max mem: 1900
+[23:18:35.296220] Epoch: [0]  [500/759]  eta: 0:00:13  lr: 0.000013  loss: 1.1362 (1.4610)  mae_m_mask: 1.1362 (1.4610)  rmse_m_mask: 1.4676 (1.8693)  normalized_mse_mask: 0.4068 (0.8699)  rmse_m_all: 2.0204 (2.6550)  actual_mask_ratio: 0.0709 (0.0720)  actual_prediction_mask_ratio: 0.2307 (0.2360)  ignored_patch_ratio: 0.0000 (0.0018)  time: 0.0405  data: 0.0001  max mem: 1900
+[23:18:36.098633] Epoch: [0]  [520/759]  eta: 0:00:11  lr: 0.000014  loss: 1.1029 (1.4515)  mae_m_mask: 1.1029 (1.4515)  rmse_m_mask: 1.3861 (1.8571)  normalized_mse_mask: 0.3835 (0.8597)  rmse_m_all: 1.8821 (2.6341)  actual_mask_ratio: 0.0714 (0.0720)  actual_prediction_mask_ratio: 0.2351 (0.2359)  ignored_patch_ratio: 0.0000 (0.0019)  time: 0.0401  data: 0.0001  max mem: 1900
+[23:18:36.905240] Epoch: [0]  [540/759]  eta: 0:00:10  lr: 0.000014  loss: 0.9494 (1.4354)  mae_m_mask: 0.9494 (1.4354)  rmse_m_mask: 1.1586 (1.8385)  normalized_mse_mask: 0.1361 (0.8443)  rmse_m_all: 1.9897 (2.6102)  actual_mask_ratio: 0.0703 (0.0719)  actual_prediction_mask_ratio: 0.2324 (0.2358)  ignored_patch_ratio: 0.0000 (0.0018)  time: 0.0403  data: 0.0001  max mem: 1900
+[23:18:37.711528] Epoch: [0]  [560/759]  eta: 0:00:09  lr: 0.000015  loss: 1.0570 (1.4244)  mae_m_mask: 1.0570 (1.4244)  rmse_m_mask: 1.3853 (1.8236)  normalized_mse_mask: 0.2894 (0.8305)  rmse_m_all: 2.2982 (2.5988)  actual_mask_ratio: 0.0726 (0.0719)  actual_prediction_mask_ratio: 0.2307 (0.2357)  ignored_patch_ratio: 0.0000 (0.0018)  time: 0.0403  data: 0.0001  max mem: 1900
+[23:18:38.517840] Epoch: [0]  [580/759]  eta: 0:00:08  lr: 0.000015  loss: 0.8310 (1.4092)  mae_m_mask: 0.8310 (1.4092)  rmse_m_mask: 1.0949 (1.8047)  normalized_mse_mask: 0.2741 (0.8252)  rmse_m_all: 1.4738 (2.5686)  actual_mask_ratio: 0.0726 (0.0719)  actual_prediction_mask_ratio: 0.2358 (0.2358)  ignored_patch_ratio: 0.0000 (0.0019)  time: 0.0403  data: 0.0001  max mem: 1900
+[23:18:39.328120] Epoch: [0]  [600/759]  eta: 0:00:07  lr: 0.000016  loss: 0.8431 (1.3932)  mae_m_mask: 0.8431 (1.3932)  rmse_m_mask: 1.0906 (1.7847)  normalized_mse_mask: 0.1896 (0.8127)  rmse_m_all: 2.3714 (2.5606)  actual_mask_ratio: 0.0658 (0.0718)  actual_prediction_mask_ratio: 0.2228 (0.2354)  ignored_patch_ratio: 0.0000 (0.0020)  time: 0.0405  data: 0.0001  max mem: 1900
+[23:18:40.133593] Epoch: [0]  [620/759]  eta: 0:00:06  lr: 0.000016  loss: 0.9277 (1.3809)  mae_m_mask: 0.9277 (1.3809)  rmse_m_mask: 1.2231 (1.7687)  normalized_mse_mask: 0.1308 (0.8015)  rmse_m_all: 1.8235 (2.5437)  actual_mask_ratio: 0.0743 (0.0718)  actual_prediction_mask_ratio: 0.2426 (0.2355)  ignored_patch_ratio: 0.0000 (0.0020)  time: 0.0402  data: 0.0001  max mem: 1900
+[23:18:40.938003] Epoch: [0]  [640/759]  eta: 0:00:05  lr: 0.000017  loss: 0.9266 (1.3678)  mae_m_mask: 0.9266 (1.3678)  rmse_m_mask: 1.1260 (1.7515)  normalized_mse_mask: 0.1862 (0.7903)  rmse_m_all: 2.0795 (2.5312)  actual_mask_ratio: 0.0765 (0.0719)  actual_prediction_mask_ratio: 0.2456 (0.2357)  ignored_patch_ratio: 0.0000 (0.0020)  time: 0.0402  data: 0.0001  max mem: 1900
+[23:18:41.742314] Epoch: [0]  [660/759]  eta: 0:00:04  lr: 0.000017  loss: 0.8146 (1.3545)  mae_m_mask: 0.8146 (1.3545)  rmse_m_mask: 1.1020 (1.7351)  normalized_mse_mask: 0.3045 (0.7830)  rmse_m_all: 2.1978 (2.5245)  actual_mask_ratio: 0.0692 (0.0719)  actual_prediction_mask_ratio: 0.2313 (0.2356)  ignored_patch_ratio: 0.0000 (0.0020)  time: 0.0402  data: 0.0001  max mem: 1900
+[23:18:42.550379] Epoch: [0]  [680/759]  eta: 0:00:03  lr: 0.000018  loss: 0.9499 (1.3456)  mae_m_mask: 0.9499 (1.3456)  rmse_m_mask: 1.2023 (1.7247)  normalized_mse_mask: 0.1627 (0.7725)  rmse_m_all: 2.7858 (2.5245)  actual_mask_ratio: 0.0697 (0.0718)  actual_prediction_mask_ratio: 0.2313 (0.2353)  ignored_patch_ratio: 0.0000 (0.0021)  time: 0.0404  data: 0.0001  max mem: 1900
+[23:18:43.359108] Epoch: [0]  [700/759]  eta: 0:00:02  lr: 0.000018  loss: 0.5881 (1.3294)  mae_m_mask: 0.5881 (1.3294)  rmse_m_mask: 0.7995 (1.7034)  normalized_mse_mask: 0.1916 (0.7640)  rmse_m_all: 2.2831 (2.5162)  actual_mask_ratio: 0.0697 (0.0718)  actual_prediction_mask_ratio: 0.2426 (0.2353)  ignored_patch_ratio: 0.0000 (0.0021)  time: 0.0404  data: 0.0001  max mem: 1900
+[23:18:44.163485] Epoch: [0]  [720/759]  eta: 0:00:01  lr: 0.000019  loss: 0.8280 (1.3165)  mae_m_mask: 0.8280 (1.3165)  rmse_m_mask: 1.1509 (1.6887)  normalized_mse_mask: 0.1831 (0.7567)  rmse_m_all: 2.0680 (2.5049)  actual_mask_ratio: 0.0703 (0.0717)  actual_prediction_mask_ratio: 0.2375 (0.2352)  ignored_patch_ratio: 0.0000 (0.0022)  time: 0.0402  data: 0.0001  max mem: 1900
+[23:18:44.970055] Epoch: [0]  [740/759]  eta: 0:00:00  lr: 0.000019  loss: 0.7111 (1.3058)  mae_m_mask: 0.7111 (1.3058)  rmse_m_mask: 0.9724 (1.6745)  normalized_mse_mask: 0.1380 (0.7469)  rmse_m_all: 2.6598 (2.5085)  actual_mask_ratio: 0.0704 (0.0717)  actual_prediction_mask_ratio: 0.2336 (0.2351)  ignored_patch_ratio: 0.0000 (0.0022)  time: 0.0403  data: 0.0001  max mem: 1900
+[23:18:45.691071] Epoch: [0]  [758/759]  eta: 0:00:00  lr: 0.000020  loss: 0.9761 (1.2980)  mae_m_mask: 0.9761 (1.2980)  rmse_m_mask: 1.2388 (1.6648)  normalized_mse_mask: 0.3304 (0.7406)  rmse_m_all: 2.1427 (2.5006)  actual_mask_ratio: 0.0709 (0.0717)  actual_prediction_mask_ratio: 0.2330 (0.2352)  ignored_patch_ratio: 0.0000 (0.0022)  time: 0.0402  data: 0.0001  max mem: 1900
+[23:18:45.725720] Epoch: [0] Total time: 0:00:35 (0.0470 s / it)
+[23:18:45.725879] Averaged stats: {'lr': 9.947351153743985e-06, 'loss': 1.3009474260667078, 'mae_m_mask': 1.3009474260667078, 'rmse_m_mask': 1.89335311226891, 'normalized_mse_mask': 0.7416971864030153, 'rmse_m_all': 2.500577229520549, 'actual_mask_ratio': 0.07173722518585887, 'actual_prediction_mask_ratio': 0.235172952725325, 'ignored_patch_ratio': 0.002177197628498706, 'supervised_pixel_count': 14703975.0}
+[23:18:45.847654] Val: [0]  [  0/533]  eta: 0:01:03  loss: 1.9115 (1.9115)  mae_m_mask: 1.9115 (1.9115)  rmse_m_mask: 2.1857 (2.1857)  normalized_mse_mask: 0.0310 (0.0310)  rmse_m_all: 5.0326 (5.0326)  actual_mask_ratio: 0.0787 (0.0787)  actual_prediction_mask_ratio: 0.2431 (0.2431)  ignored_patch_ratio: 0.0488 (0.0488)  time: 0.1197  data: 0.0878  max mem: 1900
+[23:18:47.211620] Val: [0]  [ 50/533]  eta: 0:00:14  loss: 1.0910 (1.2252)  mae_m_mask: 1.0910 (1.2252)  rmse_m_mask: 1.2275 (1.4284)  normalized_mse_mask: 0.0033 (0.0088)  rmse_m_all: 3.8186 (4.0478)  actual_mask_ratio: 0.0694 (0.0693)  actual_prediction_mask_ratio: 0.2120 (0.2147)  ignored_patch_ratio: 0.0527 (0.0550)  time: 0.0272  data: 0.0001  max mem: 1900
+[23:18:48.577800] Val: [0]  [100/533]  eta: 0:00:12  loss: 0.9639 (1.1939)  mae_m_mask: 0.9639 (1.1939)  rmse_m_mask: 1.2079 (1.4230)  normalized_mse_mask: 0.0012 (0.0057)  rmse_m_all: 5.2086 (4.5442)  actual_mask_ratio: 0.0645 (0.0686)  actual_prediction_mask_ratio: 0.2076 (0.2139)  ignored_patch_ratio: 0.0550 (0.0538)  time: 0.0273  data: 0.0001  max mem: 1900
+[23:18:49.949723] Val: [0]  [150/533]  eta: 0:00:10  loss: 0.9121 (1.1996)  mae_m_mask: 0.9121 (1.1996)  rmse_m_mask: 1.0636 (1.4285)  normalized_mse_mask: 0.0045 (0.0053)  rmse_m_all: 3.3098 (4.6124)  actual_mask_ratio: 0.0707 (0.0688)  actual_prediction_mask_ratio: 0.2326 (0.2153)  ignored_patch_ratio: 0.0488 (0.0542)  time: 0.0277  data: 0.0001  max mem: 1900
+[23:18:51.328147] Val: [0]  [200/533]  eta: 0:00:09  loss: 0.8180 (1.1394)  mae_m_mask: 0.8180 (1.1394)  rmse_m_mask: 1.0391 (1.3659)  normalized_mse_mask: 0.0014 (0.0048)  rmse_m_all: 3.8081 (4.4060)  actual_mask_ratio: 0.0760 (0.0695)  actual_prediction_mask_ratio: 0.2427 (0.2204)  ignored_patch_ratio: 0.0000 (0.0447)  time: 0.0272  data: 0.0001  max mem: 1900
+[23:18:52.690818] Val: [0]  [250/533]  eta: 0:00:07  loss: 1.4404 (1.2005)  mae_m_mask: 1.4404 (1.2005)  rmse_m_mask: 1.8711 (1.4348)  normalized_mse_mask: 0.0028 (0.0047)  rmse_m_all: 5.2205 (4.5509)  actual_mask_ratio: 0.0725 (0.0702)  actual_prediction_mask_ratio: 0.2314 (0.2225)  ignored_patch_ratio: 0.0306 (0.0393)  time: 0.0271  data: 0.0001  max mem: 1900
+[23:18:54.047007] Val: [0]  [300/533]  eta: 0:00:06  loss: 1.7074 (1.2697)  mae_m_mask: 1.7074 (1.2697)  rmse_m_mask: 2.0419 (1.5215)  normalized_mse_mask: 0.0020 (0.0045)  rmse_m_all: 6.8478 (4.9694)  actual_mask_ratio: 0.0700 (0.0704)  actual_prediction_mask_ratio: 0.2121 (0.2229)  ignored_patch_ratio: 0.0516 (0.0394)  time: 0.0271  data: 0.0001  max mem: 1900
+[23:18:55.422145] Val: [0]  [350/533]  eta: 0:00:05  loss: 1.5097 (1.2801)  mae_m_mask: 1.5097 (1.2801)  rmse_m_mask: 1.9045 (1.5351)  normalized_mse_mask: 0.0020 (0.0044)  rmse_m_all: 6.1702 (5.0445)  actual_mask_ratio: 0.0698 (0.0705)  actual_prediction_mask_ratio: 0.2170 (0.2230)  ignored_patch_ratio: 0.0391 (0.0384)  time: 0.0276  data: 0.0001  max mem: 1900
+[23:18:56.824286] Val: [0]  [400/533]  eta: 0:00:03  loss: 1.2221 (1.3421)  mae_m_mask: 1.2221 (1.3421)  rmse_m_mask: 1.5293 (1.6044)  normalized_mse_mask: 0.0023 (0.0044)  rmse_m_all: 6.2325 (5.1644)  actual_mask_ratio: 0.0683 (0.0702)  actual_prediction_mask_ratio: 0.2164 (0.2218)  ignored_patch_ratio: 0.0476 (0.0400)  time: 0.0279  data: 0.0004  max mem: 1900
+[23:18:58.219174] Val: [0]  [450/533]  eta: 0:00:02  loss: 1.4143 (1.3622)  mae_m_mask: 1.4143 (1.3622)  rmse_m_mask: 1.8082 (1.6272)  normalized_mse_mask: 0.0031 (0.0047)  rmse_m_all: 5.7020 (5.1911)  actual_mask_ratio: 0.0670 (0.0702)  actual_prediction_mask_ratio: 0.2143 (0.2217)  ignored_patch_ratio: 0.0612 (0.0412)  time: 0.0279  data: 0.0004  max mem: 1900
+[23:18:59.613258] Val: [0]  [500/533]  eta: 0:00:00  loss: 0.8275 (1.3364)  mae_m_mask: 0.8275 (1.3364)  rmse_m_mask: 1.0544 (1.5969)  normalized_mse_mask: 0.0011 (0.0044)  rmse_m_all: 4.3984 (5.1663)  actual_mask_ratio: 0.0673 (0.0700)  actual_prediction_mask_ratio: 0.2116 (0.2212)  ignored_patch_ratio: 0.0573 (0.0425)  time: 0.0279  data: 0.0004  max mem: 1900
+[23:19:00.478002] Val: [0]  [532/533]  eta: 0:00:00  loss: 1.5806 (1.3407)  mae_m_mask: 1.5806 (1.3407)  rmse_m_mask: 1.8602 (1.6004)  normalized_mse_mask: 0.0031 (0.0045)  rmse_m_all: 5.4071 (5.1777)  actual_mask_ratio: 0.0666 (0.0699)  actual_prediction_mask_ratio: 0.2121 (0.2208)  ignored_patch_ratio: 0.0550 (0.0432)  time: 0.0267  data: 0.0001  max mem: 1900
+[23:19:00.514224] Val: [0] Total time: 0:00:14 (0.0277 s / it)
+[23:19:00.514574] val stats: {'loss': 1.3222459353596945, 'mae_m_mask': 1.3222459353596945, 'rmse_m_mask': 1.7135592995558158, 'normalized_mse_mask': 0.004605810497458781, 'rmse_m_all': 5.1776673187681705, 'actual_mask_ratio': 0.06990061117437499, 'actual_prediction_mask_ratio': 0.22084709342156744, 'ignored_patch_ratio': 0.04319662906886489, 'supervised_pixel_count': 11054205.0}
+[23:19:26.996223] log_dir: /tank/data/SFS/xinyis/data/bathymetry/MAE-Topography/Downstream_Task_Bathy/cross_validation_v3_meterMAE/runs/holdout_CA_D002MeterMAE_D001NoDataSafe/smoke_meterMAE_CA_CA_KlamathRiver_TopoBathy_2018_D18_v2_dualmask_meterMAE_corePixel_Best-val_mae_m_mask_e2_b4_acc4/tb
+[23:19:27.138745] Epoch: [1]  [  0/759]  eta: 0:01:47  lr: 0.000020  loss: 1.0035 (1.0035)  mae_m_mask: 1.0035 (1.0035)  rmse_m_mask: 1.4374 (1.4374)  normalized_mse_mask: 0.0075 (0.0075)  rmse_m_all: 3.0160 (3.0160)  actual_mask_ratio: 0.0811 (0.0811)  actual_prediction_mask_ratio: 0.2511 (0.2511)  ignored_patch_ratio: 0.0000 (0.0000)  time: 0.1421  data: 0.0927  max mem: 1900
+[23:19:27.947636] Epoch: [1]  [ 20/759]  eta: 0:00:33  lr: 0.000021  loss: 0.6315 (0.7920)  mae_m_mask: 0.6315 (0.7920)  rmse_m_mask: 0.8339 (1.0304)  normalized_mse_mask: 0.4254 (0.5992)  rmse_m_all: 1.4018 (1.6465)  actual_mask_ratio: 0.0754 (0.0747)  actual_prediction_mask_ratio: 0.2370 (0.2371)  ignored_patch_ratio: 0.0000 (0.0023)  time: 0.0404  data: 0.0001  max mem: 1900
+[23:19:28.754467] Epoch: [1]  [ 40/759]  eta: 0:00:30  lr: 0.000021  loss: 0.8494 (0.8569)  mae_m_mask: 0.8494 (0.8569)  rmse_m_mask: 1.1592 (1.1034)  normalized_mse_mask: 0.1969 (0.4984)  rmse_m_all: 1.6150 (1.8131)  actual_mask_ratio: 0.0697 (0.0728)  actual_prediction_mask_ratio: 0.2347 (0.2371)  ignored_patch_ratio: 0.0000 (0.0017)  time: 0.0403  data: 0.0001  max mem: 1900
+[23:19:29.563633] Epoch: [1]  [ 60/759]  eta: 0:00:29  lr: 0.000022  loss: 0.8590 (0.9210)  mae_m_mask: 0.8590 (0.9210)  rmse_m_mask: 1.1527 (1.2014)  normalized_mse_mask: 0.1573 (0.4494)  rmse_m_all: 1.8770 (1.9454)  actual_mask_ratio: 0.0703 (0.0723)  actual_prediction_mask_ratio: 0.2256 (0.2360)  ignored_patch_ratio: 0.0000 (0.0021)  time: 0.0404  data: 0.0001  max mem: 1900
+[23:19:30.402170] Epoch: [1]  [ 80/759]  eta: 0:00:28  lr: 0.000022  loss: 0.8951 (0.9599)  mae_m_mask: 0.8951 (0.9599)  rmse_m_mask: 1.3697 (1.2569)  normalized_mse_mask: 0.1236 (0.3991)  rmse_m_all: 2.7661 (2.1203)  actual_mask_ratio: 0.0686 (0.0716)  actual_prediction_mask_ratio: 0.2251 (0.2344)  ignored_patch_ratio: 0.0000 (0.0020)  time: 0.0419  data: 0.0001  max mem: 1900
+[23:19:31.226750] Epoch: [1]  [100/759]  eta: 0:00:27  lr: 0.000023  loss: 0.8854 (0.9542)  mae_m_mask: 0.8854 (0.9542)  rmse_m_mask: 1.1903 (1.2437)  normalized_mse_mask: 0.1369 (0.3975)  rmse_m_all: 2.1314 (2.1247)  actual_mask_ratio: 0.0737 (0.0717)  actual_prediction_mask_ratio: 0.2353 (0.2347)  ignored_patch_ratio: 0.0000 (0.0023)  time: 0.0412  data: 0.0001  max mem: 1900
+[23:19:32.039355] Epoch: [1]  [120/759]  eta: 0:00:26  lr: 0.000023  loss: 1.0827 (0.9789)  mae_m_mask: 1.0827 (0.9789)  rmse_m_mask: 1.3878 (1.2750)  normalized_mse_mask: 0.2556 (0.3986)  rmse_m_all: 2.3911 (2.2036)  actual_mask_ratio: 0.0697 (0.0715)  actual_prediction_mask_ratio: 0.2387 (0.2352)  ignored_patch_ratio: 0.0000 (0.0025)  time: 0.0406  data: 0.0001  max mem: 1900
+[23:19:32.850397] Epoch: [1]  [140/759]  eta: 0:00:25  lr: 0.000024  loss: 0.9741 (0.9999)  mae_m_mask: 0.9741 (0.9999)  rmse_m_mask: 1.3067 (1.2986)  normalized_mse_mask: 0.1595 (0.3857)  rmse_m_all: 2.3302 (2.2258)  actual_mask_ratio: 0.0743 (0.0717)  actual_prediction_mask_ratio: 0.2392 (0.2355)  ignored_patch_ratio: 0.0000 (0.0023)  time: 0.0405  data: 0.0001  max mem: 1900
+[23:19:33.658189] Epoch: [1]  [160/759]  eta: 0:00:24  lr: 0.000024  loss: 0.8136 (0.9921)  mae_m_mask: 0.8136 (0.9921)  rmse_m_mask: 1.1624 (1.2875)  normalized_mse_mask: 0.2363 (0.3926)  rmse_m_all: 2.0535 (2.2311)  actual_mask_ratio: 0.0724 (0.0716)  actual_prediction_mask_ratio: 0.2409 (0.2353)  ignored_patch_ratio: 0.0000 (0.0021)  time: 0.0404  data: 0.0001  max mem: 1900
+[23:19:34.463565] Epoch: [1]  [180/759]  eta: 0:00:23  lr: 0.000025  loss: 0.9330 (0.9875)  mae_m_mask: 0.9330 (0.9875)  rmse_m_mask: 1.1007 (1.2765)  normalized_mse_mask: 0.0711 (0.3704)  rmse_m_all: 2.2121 (2.2670)  actual_mask_ratio: 0.0743 (0.0718)  actual_prediction_mask_ratio: 0.2449 (0.2361)  ignored_patch_ratio: 0.0000 (0.0019)  time: 0.0402  data: 0.0001  max mem: 1900
+[23:19:35.277874] Epoch: [1]  [200/759]  eta: 0:00:23  lr: 0.000025  loss: 0.7848 (0.9704)  mae_m_mask: 0.7848 (0.9704)  rmse_m_mask: 1.1160 (1.2578)  normalized_mse_mask: 0.0939 (0.3515)  rmse_m_all: 2.0623 (2.2713)  actual_mask_ratio: 0.0728 (0.0718)  actual_prediction_mask_ratio: 0.2311 (0.2355)  ignored_patch_ratio: 0.0000 (0.0021)  time: 0.0407  data: 0.0001  max mem: 1900
+[23:19:36.086809] Epoch: [1]  [220/759]  eta: 0:00:22  lr: 0.000026  loss: 0.7205 (0.9553)  mae_m_mask: 0.7205 (0.9553)  rmse_m_mask: 0.9933 (1.2418)  normalized_mse_mask: 0.0794 (0.3459)  rmse_m_all: 1.9268 (2.2564)  actual_mask_ratio: 0.0720 (0.0717)  actual_prediction_mask_ratio: 0.2347 (0.2357)  ignored_patch_ratio: 0.0000 (0.0021)  time: 0.0404  data: 0.0001  max mem: 1900
+[23:19:36.896391] Epoch: [1]  [240/759]  eta: 0:00:21  lr: 0.000026  loss: 0.9248 (0.9522)  mae_m_mask: 0.9248 (0.9522)  rmse_m_mask: 1.1777 (1.2399)  normalized_mse_mask: 0.1158 (0.3326)  rmse_m_all: 2.2257 (2.2560)  actual_mask_ratio: 0.0760 (0.0720)  actual_prediction_mask_ratio: 0.2460 (0.2364)  ignored_patch_ratio: 0.0000 (0.0022)  time: 0.0405  data: 0.0001  max mem: 1900
+[23:19:37.706930] Epoch: [1]  [260/759]  eta: 0:00:20  lr: 0.000027  loss: 0.8280 (0.9528)  mae_m_mask: 0.8280 (0.9528)  rmse_m_mask: 1.0612 (1.2426)  normalized_mse_mask: 0.0908 (0.3297)  rmse_m_all: 2.7909 (2.2912)  actual_mask_ratio: 0.0698 (0.0719)  actual_prediction_mask_ratio: 0.2334 (0.2361)  ignored_patch_ratio: 0.0000 (0.0021)  time: 0.0405  data: 0.0001  max mem: 1900
+[23:19:38.514484] Epoch: [1]  [280/759]  eta: 0:00:19  lr: 0.000027  loss: 0.7368 (0.9491)  mae_m_mask: 0.7368 (0.9491)  rmse_m_mask: 0.9316 (1.2346)  normalized_mse_mask: 0.1692 (0.3303)  rmse_m_all: 2.0933 (2.2887)  actual_mask_ratio: 0.0726 (0.0720)  actual_prediction_mask_ratio: 0.2430 (0.2362)  ignored_patch_ratio: 0.0000 (0.0020)  time: 0.0404  data: 0.0001  max mem: 1900
+[23:19:39.325269] Epoch: [1]  [300/759]  eta: 0:00:18  lr: 0.000028  loss: 0.8797 (0.9448)  mae_m_mask: 0.8797 (0.9448)  rmse_m_mask: 1.2028 (1.2275)  normalized_mse_mask: 0.0996 (0.3259)  rmse_m_all: 2.5022 (2.2909)  actual_mask_ratio: 0.0720 (0.0719)  actual_prediction_mask_ratio: 0.2341 (0.2361)  ignored_patch_ratio: 0.0000 (0.0020)  time: 0.0405  data: 0.0001  max mem: 1900
+[23:19:40.132670] Epoch: [1]  [320/759]  eta: 0:00:17  lr: 0.000028  loss: 0.8796 (0.9517)  mae_m_mask: 0.8796 (0.9517)  rmse_m_mask: 1.1471 (1.2394)  normalized_mse_mask: 0.0828 (0.3191)  rmse_m_all: 2.3708 (2.3054)  actual_mask_ratio: 0.0709 (0.0720)  actual_prediction_mask_ratio: 0.2375 (0.2364)  ignored_patch_ratio: 0.0000 (0.0020)  time: 0.0403  data: 0.0001  max mem: 1900
+[23:19:40.941409] Epoch: [1]  [340/759]  eta: 0:00:17  lr: 0.000029  loss: 1.2280 (0.9720)  mae_m_mask: 1.2280 (0.9720)  rmse_m_mask: 1.4425 (1.2601)  normalized_mse_mask: 0.1015 (0.3227)  rmse_m_all: 2.5498 (2.3377)  actual_mask_ratio: 0.0709 (0.0719)  actual_prediction_mask_ratio: 0.2296 (0.2361)  ignored_patch_ratio: 0.0000 (0.0020)  time: 0.0404  data: 0.0001  max mem: 1900
+[23:19:41.752339] Epoch: [1]  [360/759]  eta: 0:00:16  lr: 0.000029  loss: 0.8529 (0.9732)  mae_m_mask: 0.8529 (0.9732)  rmse_m_mask: 1.0771 (1.2615)  normalized_mse_mask: 0.0587 (0.3174)  rmse_m_all: 2.3436 (2.3539)  actual_mask_ratio: 0.0697 (0.0718)  actual_prediction_mask_ratio: 0.2268 (0.2358)  ignored_patch_ratio: 0.0000 (0.0021)  time: 0.0405  data: 0.0001  max mem: 1900
+[23:19:42.564435] Epoch: [1]  [380/759]  eta: 0:00:15  lr: 0.000030  loss: 0.6860 (0.9593)  mae_m_mask: 0.6860 (0.9593)  rmse_m_mask: 0.8548 (1.2453)  normalized_mse_mask: 0.1586 (0.3136)  rmse_m_all: 2.6054 (2.3652)  actual_mask_ratio: 0.0703 (0.0717)  actual_prediction_mask_ratio: 0.2353 (0.2357)  ignored_patch_ratio: 0.0000 (0.0020)  time: 0.0406  data: 0.0001  max mem: 1900
+[23:19:43.374830] Epoch: [1]  [400/759]  eta: 0:00:14  lr: 0.000031  loss: 0.7625 (0.9531)  mae_m_mask: 0.7625 (0.9531)  rmse_m_mask: 1.0361 (1.2357)  normalized_mse_mask: 0.0978 (0.3137)  rmse_m_all: 1.8541 (2.3517)  actual_mask_ratio: 0.0709 (0.0717)  actual_prediction_mask_ratio: 0.2279 (0.2353)  ignored_patch_ratio: 0.0000 (0.0020)  time: 0.0405  data: 0.0001  max mem: 1900
+[23:19:44.182345] Epoch: [1]  [420/759]  eta: 0:00:13  lr: 0.000031  loss: 0.7130 (0.9464)  mae_m_mask: 0.7130 (0.9464)  rmse_m_mask: 0.9929 (1.2280)  normalized_mse_mask: 0.0960 (0.3165)  rmse_m_all: 2.2637 (2.3517)  actual_mask_ratio: 0.0686 (0.0716)  actual_prediction_mask_ratio: 0.2285 (0.2351)  ignored_patch_ratio: 0.0000 (0.0020)  time: 0.0404  data: 0.0001  max mem: 1900
+[23:19:44.992876] Epoch: [1]  [440/759]  eta: 0:00:13  lr: 0.000032  loss: 0.6880 (0.9387)  mae_m_mask: 0.6880 (0.9387)  rmse_m_mask: 0.8485 (1.2178)  normalized_mse_mask: 0.1386 (0.3124)  rmse_m_all: 1.7943 (2.3413)  actual_mask_ratio: 0.0703 (0.0715)  actual_prediction_mask_ratio: 0.2341 (0.2347)  ignored_patch_ratio: 0.0000 (0.0021)  time: 0.0405  data: 0.0001  max mem: 1900
+[23:19:45.800214] Epoch: [1]  [460/759]  eta: 0:00:12  lr: 0.000032  loss: 0.4684 (0.9256)  mae_m_mask: 0.4684 (0.9256)  rmse_m_mask: 0.6497 (1.2024)  normalized_mse_mask: 0.0767 (0.3043)  rmse_m_all: 2.0418 (2.3387)  actual_mask_ratio: 0.0731 (0.0716)  actual_prediction_mask_ratio: 0.2409 (0.2347)  ignored_patch_ratio: 0.0000 (0.0022)  time: 0.0403  data: 0.0001  max mem: 1900
+[23:19:46.609401] Epoch: [1]  [480/759]  eta: 0:00:11  lr: 0.000033  loss: 0.6766 (0.9184)  mae_m_mask: 0.6766 (0.9184)  rmse_m_mask: 0.8925 (1.1930)  normalized_mse_mask: 0.1531 (0.3039)  rmse_m_all: 2.1921 (2.3332)  actual_mask_ratio: 0.0743 (0.0716)  actual_prediction_mask_ratio: 0.2449 (0.2349)  ignored_patch_ratio: 0.0000 (0.0022)  time: 0.0404  data: 0.0001  max mem: 1900
+[23:19:47.418867] Epoch: [1]  [500/759]  eta: 0:00:10  lr: 0.000033  loss: 0.7025 (0.9130)  mae_m_mask: 0.7025 (0.9130)  rmse_m_mask: 0.9329 (1.1857)  normalized_mse_mask: 0.1119 (0.3050)  rmse_m_all: 2.6190 (2.3441)  actual_mask_ratio: 0.0743 (0.0717)  actual_prediction_mask_ratio: 0.2415 (0.2350)  ignored_patch_ratio: 0.0000 (0.0022)  time: 0.0404  data: 0.0001  max mem: 1900
+[23:19:48.231368] Epoch: [1]  [520/759]  eta: 0:00:09  lr: 0.000034  loss: 0.7650 (0.9097)  mae_m_mask: 0.7650 (0.9097)  rmse_m_mask: 0.9757 (1.1840)  normalized_mse_mask: 0.0793 (0.2972)  rmse_m_all: 2.2203 (2.3466)  actual_mask_ratio: 0.0663 (0.0715)  actual_prediction_mask_ratio: 0.2296 (0.2347)  ignored_patch_ratio: 0.0000 (0.0023)  time: 0.0406  data: 0.0001  max mem: 1900
+[23:19:49.041254] Epoch: [1]  [540/759]  eta: 0:00:08  lr: 0.000034  loss: 0.7222 (0.9056)  mae_m_mask: 0.7222 (0.9056)  rmse_m_mask: 0.9759 (1.1802)  normalized_mse_mask: 0.1706 (0.2929)  rmse_m_all: 2.3563 (2.3492)  actual_mask_ratio: 0.0743 (0.0716)  actual_prediction_mask_ratio: 0.2396 (0.2349)  ignored_patch_ratio: 0.0000 (0.0022)  time: 0.0405  data: 0.0001  max mem: 1900
+[23:19:49.849845] Epoch: [1]  [560/759]  eta: 0:00:08  lr: 0.000035  loss: 0.6261 (0.8982)  mae_m_mask: 0.6261 (0.8982)  rmse_m_mask: 0.8544 (1.1707)  normalized_mse_mask: 0.0697 (0.2898)  rmse_m_all: 2.0506 (2.3416)  actual_mask_ratio: 0.0714 (0.0716)  actual_prediction_mask_ratio: 0.2324 (0.2348)  ignored_patch_ratio: 0.0000 (0.0022)  time: 0.0404  data: 0.0001  max mem: 1900
+[23:19:50.690561] Epoch: [1]  [580/759]  eta: 0:00:07  lr: 0.000035  loss: 0.7627 (0.8943)  mae_m_mask: 0.7627 (0.8943)  rmse_m_mask: 0.9681 (1.1647)  normalized_mse_mask: 0.1048 (0.2905)  rmse_m_all: 2.2462 (2.3446)  actual_mask_ratio: 0.0726 (0.0716)  actual_prediction_mask_ratio: 0.2339 (0.2349)  ignored_patch_ratio: 0.0000 (0.0023)  time: 0.0420  data: 0.0001  max mem: 1900
+[23:19:51.562019] Epoch: [1]  [600/759]  eta: 0:00:06  lr: 0.000036  loss: 0.6635 (0.8870)  mae_m_mask: 0.6635 (0.8870)  rmse_m_mask: 0.8552 (1.1555)  normalized_mse_mask: 0.1026 (0.2888)  rmse_m_all: 1.7100 (2.3342)  actual_mask_ratio: 0.0731 (0.0717)  actual_prediction_mask_ratio: 0.2404 (0.2351)  ignored_patch_ratio: 0.0000 (0.0023)  time: 0.0435  data: 0.0001  max mem: 1900
+[23:19:52.428333] Epoch: [1]  [620/759]  eta: 0:00:05  lr: 0.000036  loss: 0.7382 (0.8825)  mae_m_mask: 0.7382 (0.8825)  rmse_m_mask: 0.9688 (1.1500)  normalized_mse_mask: 0.2246 (0.2889)  rmse_m_all: 2.1435 (2.3300)  actual_mask_ratio: 0.0743 (0.0718)  actual_prediction_mask_ratio: 0.2364 (0.2352)  ignored_patch_ratio: 0.0000 (0.0023)  time: 0.0433  data: 0.0001  max mem: 1900
+[23:19:53.298487] Epoch: [1]  [640/759]  eta: 0:00:04  lr: 0.000037  loss: 1.0270 (0.8906)  mae_m_mask: 1.0270 (0.8906)  rmse_m_mask: 1.3414 (1.1613)  normalized_mse_mask: 0.1011 (0.2896)  rmse_m_all: 2.8852 (2.3520)  actual_mask_ratio: 0.0720 (0.0718)  actual_prediction_mask_ratio: 0.2319 (0.2352)  ignored_patch_ratio: 0.0000 (0.0022)  time: 0.0435  data: 0.0001  max mem: 1900
+[23:19:54.164198] Epoch: [1]  [660/759]  eta: 0:00:04  lr: 0.000037  loss: 0.7249 (0.8877)  mae_m_mask: 0.7249 (0.8877)  rmse_m_mask: 0.9646 (1.1596)  normalized_mse_mask: 0.0489 (0.2838)  rmse_m_all: 1.9032 (2.3487)  actual_mask_ratio: 0.0731 (0.0718)  actual_prediction_mask_ratio: 0.2330 (0.2351)  ignored_patch_ratio: 0.0000 (0.0022)  time: 0.0433  data: 0.0001  max mem: 1900
+[23:19:54.998366] Epoch: [1]  [680/759]  eta: 0:00:03  lr: 0.000038  loss: 0.6875 (0.8833)  mae_m_mask: 0.6875 (0.8833)  rmse_m_mask: 0.9619 (1.1552)  normalized_mse_mask: 0.0980 (0.2795)  rmse_m_all: 2.0685 (2.3437)  actual_mask_ratio: 0.0693 (0.0717)  actual_prediction_mask_ratio: 0.2330 (0.2351)  ignored_patch_ratio: 0.0000 (0.0022)  time: 0.0417  data: 0.0001  max mem: 1900
+[23:19:55.804435] Epoch: [1]  [700/759]  eta: 0:00:02  lr: 0.000038  loss: 0.8837 (0.8850)  mae_m_mask: 0.8837 (0.8850)  rmse_m_mask: 1.1808 (1.1571)  normalized_mse_mask: 0.1268 (0.2785)  rmse_m_all: 2.0573 (2.3404)  actual_mask_ratio: 0.0737 (0.0718)  actual_prediction_mask_ratio: 0.2411 (0.2353)  ignored_patch_ratio: 0.0000 (0.0023)  time: 0.0403  data: 0.0001  max mem: 1900
+[23:19:56.613785] Epoch: [1]  [720/759]  eta: 0:00:01  lr: 0.000039  loss: 0.9393 (0.8851)  mae_m_mask: 0.9393 (0.8851)  rmse_m_mask: 1.2001 (1.1571)  normalized_mse_mask: 0.1355 (0.2796)  rmse_m_all: 2.5317 (2.3466)  actual_mask_ratio: 0.0686 (0.0717)  actual_prediction_mask_ratio: 0.2245 (0.2350)  ignored_patch_ratio: 0.0000 (0.0023)  time: 0.0404  data: 0.0001  max mem: 1900
+[23:19:57.425497] Epoch: [1]  [740/759]  eta: 0:00:00  lr: 0.000039  loss: 0.7505 (0.8828)  mae_m_mask: 0.7505 (0.8828)  rmse_m_mask: 1.0196 (1.1539)  normalized_mse_mask: 0.1183 (0.2800)  rmse_m_all: 2.7826 (2.3552)  actual_mask_ratio: 0.0709 (0.0717)  actual_prediction_mask_ratio: 0.2404 (0.2351)  ignored_patch_ratio: 0.0000 (0.0022)  time: 0.0406  data: 0.0001  max mem: 1900
+[23:19:58.151524] Epoch: [1]  [758/759]  eta: 0:00:00  lr: 0.000040  loss: 0.8201 (0.8829)  mae_m_mask: 0.8201 (0.8829)  rmse_m_mask: 1.0907 (1.1537)  normalized_mse_mask: 0.0643 (0.2771)  rmse_m_all: 2.6783 (2.3686)  actual_mask_ratio: 0.0760 (0.0717)  actual_prediction_mask_ratio: 0.2343 (0.2352)  ignored_patch_ratio: 0.0000 (0.0022)  time: 0.0404  data: 0.0001  max mem: 1900
+[23:19:58.193378] Epoch: [1] Total time: 0:00:31 (0.0411 s / it)
+[23:19:58.193501] Averaged stats: {'lr': 2.9947351153743998e-05, 'loss': 0.8764384529106847, 'mae_m_mask': 0.8764384529106847, 'rmse_m_mask': 1.248934258028009, 'normalized_mse_mask': 0.27945413001046493, 'rmse_m_all': 2.3686329060392417, 'actual_mask_ratio': 0.07173511211187315, 'actual_prediction_mask_ratio': 0.2351759079259689, 'ignored_patch_ratio': 0.0021771975499682117, 'supervised_pixel_count': 14694837.0}
+[23:19:58.309283] Val: [1]  [  0/533]  eta: 0:01:00  loss: 3.5606 (3.5606)  mae_m_mask: 3.5606 (3.5606)  rmse_m_mask: 3.7619 (3.7619)  normalized_mse_mask: 0.0409 (0.0409)  rmse_m_all: 5.6169 (5.6169)  actual_mask_ratio: 0.0787 (0.0787)  actual_prediction_mask_ratio: 0.2431 (0.2431)  ignored_patch_ratio: 0.0488 (0.0488)  time: 0.1139  data: 0.0850  max mem: 1900
+[23:19:59.672627] Val: [1]  [ 50/533]  eta: 0:00:13  loss: 2.0787 (2.3887)  mae_m_mask: 2.0787 (2.3887)  rmse_m_mask: 2.2386 (2.5563)  normalized_mse_mask: 0.0100 (0.0154)  rmse_m_all: 5.0979 (5.1393)  actual_mask_ratio: 0.0694 (0.0693)  actual_prediction_mask_ratio: 0.2120 (0.2147)  ignored_patch_ratio: 0.0527 (0.0550)  time: 0.0272  data: 0.0001  max mem: 1900
+[23:20:01.034214] Val: [1]  [100/533]  eta: 0:00:12  loss: 1.8493 (2.3544)  mae_m_mask: 1.8493 (2.3544)  rmse_m_mask: 2.1017 (2.5387)  normalized_mse_mask: 0.0047 (0.0114)  rmse_m_all: 7.0875 (5.7105)  actual_mask_ratio: 0.0645 (0.0686)  actual_prediction_mask_ratio: 0.2076 (0.2139)  ignored_patch_ratio: 0.0550 (0.0538)  time: 0.0272  data: 0.0001  max mem: 1900
+[23:20:02.394434] Val: [1]  [150/533]  eta: 0:00:10  loss: 1.7972 (2.4157)  mae_m_mask: 1.7972 (2.4157)  rmse_m_mask: 2.0019 (2.6009)  normalized_mse_mask: 0.0089 (0.0106)  rmse_m_all: 4.1021 (5.6615)  actual_mask_ratio: 0.0707 (0.0688)  actual_prediction_mask_ratio: 0.2326 (0.2153)  ignored_patch_ratio: 0.0488 (0.0542)  time: 0.0270  data: 0.0001  max mem: 1900
+[23:20:03.782484] Val: [1]  [200/533]  eta: 0:00:09  loss: 1.2117 (2.1983)  mae_m_mask: 1.2117 (2.1983)  rmse_m_mask: 1.4053 (2.3944)  normalized_mse_mask: 0.0039 (0.0095)  rmse_m_all: 4.7561 (5.3792)  actual_mask_ratio: 0.0760 (0.0695)  actual_prediction_mask_ratio: 0.2427 (0.2204)  ignored_patch_ratio: 0.0000 (0.0447)  time: 0.0280  data: 0.0001  max mem: 1900
+[23:20:05.224185] Val: [1]  [250/533]  eta: 0:00:07  loss: 2.8356 (2.2117)  mae_m_mask: 2.8356 (2.2117)  rmse_m_mask: 3.1652 (2.4285)  normalized_mse_mask: 0.0102 (0.0092)  rmse_m_all: 5.0573 (5.4283)  actual_mask_ratio: 0.0725 (0.0702)  actual_prediction_mask_ratio: 0.2314 (0.2225)  ignored_patch_ratio: 0.0306 (0.0393)  time: 0.0292  data: 0.0001  max mem: 1900
+[23:20:06.584074] Val: [1]  [300/533]  eta: 0:00:06  loss: 4.1865 (2.5140)  mae_m_mask: 4.1865 (2.5140)  rmse_m_mask: 4.3586 (2.7400)  normalized_mse_mask: 0.0101 (0.0096)  rmse_m_all: 7.6047 (5.7725)  actual_mask_ratio: 0.0700 (0.0704)  actual_prediction_mask_ratio: 0.2121 (0.2229)  ignored_patch_ratio: 0.0516 (0.0394)  time: 0.0271  data: 0.0001  max mem: 1900
+[23:20:07.959801] Val: [1]  [350/533]  eta: 0:00:05  loss: 2.9945 (2.5672)  mae_m_mask: 2.9945 (2.5672)  rmse_m_mask: 3.1655 (2.7934)  normalized_mse_mask: 0.0084 (0.0097)  rmse_m_all: 6.6023 (5.8111)  actual_mask_ratio: 0.0698 (0.0705)  actual_prediction_mask_ratio: 0.2170 (0.2230)  ignored_patch_ratio: 0.0391 (0.0384)  time: 0.0276  data: 0.0001  max mem: 1900
+[23:20:09.354902] Val: [1]  [400/533]  eta: 0:00:03  loss: 2.7888 (2.7023)  mae_m_mask: 2.7888 (2.7023)  rmse_m_mask: 3.2596 (2.9323)  normalized_mse_mask: 0.0081 (0.0100)  rmse_m_all: 6.7115 (5.9541)  actual_mask_ratio: 0.0683 (0.0702)  actual_prediction_mask_ratio: 0.2164 (0.2218)  ignored_patch_ratio: 0.0476 (0.0400)  time: 0.0277  data: 0.0002  max mem: 1900
+[23:20:10.748932] Val: [1]  [450/533]  eta: 0:00:02  loss: 3.5841 (2.7747)  mae_m_mask: 3.5841 (2.7747)  rmse_m_mask: 3.7592 (3.0017)  normalized_mse_mask: 0.0114 (0.0106)  rmse_m_all: 6.0688 (5.9631)  actual_mask_ratio: 0.0670 (0.0702)  actual_prediction_mask_ratio: 0.2143 (0.2217)  ignored_patch_ratio: 0.0612 (0.0412)  time: 0.0277  data: 0.0002  max mem: 1900
+[23:20:12.147509] Val: [1]  [500/533]  eta: 0:00:00  loss: 2.3946 (2.7381)  mae_m_mask: 2.3946 (2.7381)  rmse_m_mask: 2.5775 (2.9599)  normalized_mse_mask: 0.0071 (0.0103)  rmse_m_all: 5.4776 (5.9909)  actual_mask_ratio: 0.0673 (0.0700)  actual_prediction_mask_ratio: 0.2116 (0.2212)  ignored_patch_ratio: 0.0573 (0.0425)  time: 0.0281  data: 0.0004  max mem: 1900
+[23:20:13.002655] Val: [1]  [532/533]  eta: 0:00:00  loss: 3.4593 (2.7668)  mae_m_mask: 3.4593 (2.7668)  rmse_m_mask: 3.5619 (2.9859)  normalized_mse_mask: 0.0112 (0.0105)  rmse_m_all: 6.1069 (6.0046)  actual_mask_ratio: 0.0666 (0.0699)  actual_prediction_mask_ratio: 0.2121 (0.2208)  ignored_patch_ratio: 0.0550 (0.0432)  time: 0.0262  data: 0.0001  max mem: 1900
+[23:20:13.039976] Val: [1] Total time: 0:00:14 (0.0279 s / it)
+[23:20:13.040369] val stats: {'loss': 2.6987854322355442, 'mae_m_mask': 2.6987854322355442, 'rmse_m_mask': 3.1801281709043843, 'normalized_mse_mask': 0.010319102576269678, 'rmse_m_all': 6.00461088850619, 'actual_mask_ratio': 0.06990061117437499, 'actual_prediction_mask_ratio': 0.22084709342156744, 'ignored_patch_ratio': 0.04319662906886489, 'supervised_pixel_count': 11054205.0}
+[23:20:16.999841] Training time 0:02:06; best_epoch=0 best_val_mae_m_mask=1.322246
+Sun Jul 12 23:20:17 CDT 2026
+=== D025 MAE v2 dual-mask meter-MAE training done ===
+RUN=/tank/data/SFS/xinyis/data/bathymetry/MAE-Topography/Downstream_Task_Bathy/cross_validation_v3_meterMAE/runs/holdout_CA_D002MeterMAE_D001NoDataSafe/smoke_meterMAE_CA_CA_KlamathRiver_TopoBathy_2018_D18_v2_dualmask_meterMAE_corePixel_Best-val_mae_m_mask_e2_b4_acc4
+============================================================
+DONE D026
+OUT_DIR=/tank/data/SFS/xinyis/data/bathymetry/MAE-Topography/Downstream_Task_Bathy/cross_validation_v3_meterMAE/runs/holdout_CA_D002MeterMAE_D001NoDataSafe/smoke_meterMAE_CA_CA_KlamathRiver_TopoBathy_2018_D18_v2_dualmask_meterMAE_corePixel_Best-val_mae_m_mask_e2_b4_acc4
+Sun Jul 12 23:20:17 CDT 2026
+============================================================

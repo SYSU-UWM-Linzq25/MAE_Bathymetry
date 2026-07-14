@@ -1,41 +1,42 @@
 #!/usr/bin/env bash
-#SBATCH -J F046_holdout_satmap_gtiffstrip
+#SBATCH -J F052_holdout_1m_white_probe
 #SBATCH -p HydroIntel
 #SBATCH -N 1
 #SBATCH -n 1
 #SBATCH -c 12
-#SBATCH --mem=96G
-#SBATCH -t 1-00:00:00
-#SBATCH -o /tank/data/SFS/xinyis/data/bathymetry/MAE-Topography/Downstream_Task_Bathy/cross_validation_v2/logs/F046_holdout_satmap_gtiffstrip_%j.out
-#SBATCH -e /tank/data/SFS/xinyis/data/bathymetry/MAE-Topography/Downstream_Task_Bathy/cross_validation_v2/logs/F046_holdout_satmap_gtiffstrip_%j.err
+#SBATCH --mem=128G
+#SBATCH -t 3-00:00:00
+#SBATCH -o /tank/data/SFS/xinyis/data/bathymetry/MAE-Topography/Downstream_Task_Bathy/cross_validation_v2/logs/F052_holdout_1m_white_probe_%j.out
+#SBATCH -e /tank/data/SFS/xinyis/data/bathymetry/MAE-Topography/Downstream_Task_Bathy/cross_validation_v2/logs/F052_holdout_1m_white_probe_%j.err
 #SBATCH --chdir=/tank/data/SFS/xinyis/data/bathymetry/MAE-Topography
 
 set -euo pipefail
 
 ROOT=${ROOT:-/tank/data/SFS/xinyis/data/bathymetry/MAE-Topography}
 WORK=${WORK:-$ROOT/Downstream_Task_Bathy}
-SCRIPT=${SCRIPT:-$WORK/script/F045_build_fullriver_holdout_highdetail_satellite_dashboard_GTiffStripParentPyramid_20260710.py}
+SCRIPT=${SCRIPT:-$WORK/script/F051_build_holdout_dashboard_1m_WhiteNoBasemap_PointProbe_20260711.py}
 
 PRED_ROOT=${PRED_ROOT:-/tank/data/SFS/xinyis/data/bathymetry/Processed_Results/FullRiver_Predictions_F010_TileAvgVRT_D001NoDataSafe}
 ERROR_ROOT=${ERROR_ROOT:-/tank/data/SFS/xinyis/data/bathymetry/Processed_Results/FullRiver_GT_Error_F020_TileVRT_D001NoDataSafe}
 TILE_ROOT=${TILE_ROOT:-/tank/data/SFS/xinyis/data/bathymetry/Processed_Results/Tiles_for_MAE_FullRiver_E001/Tiles_1m}
 TILE_RES=${TILE_RES:-1m}
 
-OUT_DIR=${OUT_DIR:-/tank/data/SFS/xinyis/data/bathymetry/Processed_Results/FullRiver_WebMap_F045_HoldoutOnly_GTiffStripParentPyramid_D001NoDataSafe}
-OUT_HTML=${OUT_HTML:-F045_HoldoutOnly_HighDetail_Satellite_Dashboard_GTiffStripParentPyramid.html}
-ZIP_NAME=${ZIP_NAME:-F045_HoldoutOnly_HighDetail_Satellite_Dashboard_GTiffStripParentPyramid_Package.zip}
+OUT_DIR=${OUT_DIR:-/tank/data/SFS/xinyis/data/bathymetry/Processed_Results/FullRiver_WebMap_F051_Holdout_1m_WhiteNoBasemap_Probe}
+OUT_HTML=${OUT_HTML:-F051_dashboard_1m_white_nobasemap_probe.html}
+ZIP_NAME=${ZIP_NAME:-F051_dashboard_1m_white_nobasemap_probe_package.zip}
 
 # DISPLAY ONLY:
 # DETAIL_RES_M controls the intermediate EPSG:3857 display grid.
 # It does not alter F010/F020 source rasters and does not recompute F020 metrics.
 # The actual finest XYZ web-pixel size is derived from MAX_ZOOM and is written
 # explicitly into the HTML, README, and manifest.
-DETAIL_RES_M=${DETAIL_RES_M:-4}
+DETAIL_RES_M=${DETAIL_RES_M:-1}
 MIN_ZOOM=${MIN_ZOOM:--1}
 MAX_ZOOM=${MAX_ZOOM:--1}
 TILE_PROCESSES=${TILE_PROCESSES:-${SLURM_CPUS_PER_TASK:-12}}
 STATS_MAX_PX=${STATS_MAX_PX:-2200}
-OVERLAY_OPACITY=${OVERLAY_OPACITY:-0.82}
+OVERLAY_OPACITY=${OVERLAY_OPACITY:-0.90}
+PROBE_QUANTIZATION_MM=${PROBE_QUANTIZATION_MM:-1}
 OVERWRITE=${OVERWRITE:-0}
 KEEP_INTERMEDIATE=${KEEP_INTERMEDIATE:-0}
 MAKE_ZIP=${MAKE_ZIP:-1}
@@ -114,6 +115,7 @@ ARGS=(
   --tile_processes "$TILE_PROCESSES"
   --stats_max_px "$STATS_MAX_PX"
   --overlay_opacity "$OVERLAY_OPACITY"
+  --probe_quantization_mm "$PROBE_QUANTIZATION_MM"
   --experiments "${EXP_ARRAY[@]}"
 )
 
@@ -135,10 +137,16 @@ if [[ -n "${RIVERS:-}" ]]; then
 fi
 
 echo "============================================================"
-echo "F046 holdout high-detail satellite dashboard"
-echo "TILER=finest XYZ zoom via temporary RGBA GeoTIFF strips + lower parent PNG pyramid"
+echo "F052 holdout 1 m dashboard with basemap-below panes and point probe"
+echo "TILER=1 m intermediate display grid + finest XYZ color/probe tiles + parent PNG pyramid"
 echo "LOW_ZOOM_DIRECT_GDAL_WARP=NO"
 echo "GDALWARP_DIRECT_PNG=NO"
+echo "SOURCE_CRS=read from first authoritative E001 bathymetry GeoTIFF"
+echo "CRS_VALIDATION=stop if transformed holdout bounds are outside CONUS"
+echo "BROWSER_LAUNCHER=OPEN_DASHBOARD.bat included in ZIP"
+echo "BASEMAP_ORDER=basemap pane below MAE raster pane"
+echo "POINT_PROBE=enabled; finest XYZ display-grid values"
+echo "NO_BASEMAP_BACKGROUND=white"
 echo "GDAL2TILES_REQUIRED=NO"
 echo "GDAL_CALC_REQUIRED=NO"
 date
@@ -147,6 +155,7 @@ echo "CONDA_SH=$CONDA_SH"
 echo "CONDA_PREFIX=$CONDA_PREFIX"
 echo "PYTHON=$(command -v python)"
 echo "GDAL_VERSION=$(gdalinfo --version 2>&1)"
+echo "GDALSRSINFO=$(command -v gdalsrsinfo || echo optional-not-found)"
 echo "SCRIPT=$SCRIPT"
 echo "PRED_ROOT=$PRED_ROOT"
 echo "ERROR_ROOT=$ERROR_ROOT"
@@ -159,6 +168,7 @@ echo "DETAIL_RES_M=$DETAIL_RES_M"
 echo "MIN_ZOOM=$MIN_ZOOM"
 echo "MAX_ZOOM=$MAX_ZOOM"
 echo "TILE_PROCESSES=$TILE_PROCESSES"
+echo "PROBE_QUANTIZATION_MM=$PROBE_QUANTIZATION_MM"
 echo "OVERWRITE=$OVERWRITE"
 echo "KEEP_INTERMEDIATE=$KEEP_INTERMEDIATE"
 echo "MAKE_ZIP=$MAKE_ZIP"
@@ -169,7 +179,7 @@ echo "============================================================"
 python -u "$SCRIPT" "${ARGS[@]}"
 
 echo "============================================================"
-echo "DONE F046"
+echo "DONE F052"
 echo "HTML=$OUT_DIR/$OUT_HTML"
 echo "ZIP=$(dirname "$OUT_DIR")/$ZIP_NAME"
 date
