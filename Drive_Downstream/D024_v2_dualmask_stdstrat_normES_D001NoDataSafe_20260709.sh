@@ -37,7 +37,7 @@ else
   DATA_SUFFIX=""
 fi
 
-SPLIT_SCRIPT=${SPLIT_SCRIPT:-$WORK/script/A017_v2_prepare_stdstratified_river_split_20260708.py}
+SPLIT_SCRIPT=${SPLIT_SCRIPT:-$WORK/script/A020s_prepare_v2_dualmask_stdstratified_river_split_20260708.py}
 TRAIN_BACKEND=${TRAIN_BACKEND:-$WORK/script/D020_v2_dualmask_coreloss_train_backend_normES_20260708.sh}
 
 GPU_ID=${GPU_ID:-0}

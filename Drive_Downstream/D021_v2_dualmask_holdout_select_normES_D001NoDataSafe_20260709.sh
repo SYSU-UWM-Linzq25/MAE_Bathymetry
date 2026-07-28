@@ -42,7 +42,7 @@ else
   DATA_SUFFIX=""
 fi
 
-SPLIT_SCRIPT=${SPLIT_SCRIPT:-$WORK/script/A016_v2_holdout_split_20260707_final.py}
+SPLIT_SCRIPT=${SPLIT_SCRIPT:-$WORK/script/A020_prepare_v2_dualmask_holdout_split_20260707.py}
 TRAIN_BACKEND=${TRAIN_BACKEND:-$WORK/script/D020_v2_dualmask_coreloss_train_backend_normES_20260708.sh}
 
 HOLDOUT_PRESET=${HOLDOUT_PRESET:-CO}
