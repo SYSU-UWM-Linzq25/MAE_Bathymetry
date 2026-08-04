@@ -1,0 +1,21 @@
+D001c RELAX four-model final training package
+Date: 2026-07-29
+
+Formal submitter:
+  script/D058_relax_submit_all_four.sh
+
+Preflight:
+  script/D059_relax_preflight_four_models.sh
+
+Unified objective code:
+  code_relax/main_pretrain_dem_unified_relax.py
+  code_relax/engine_pretrain_unified_relax.py
+
+Model definitions:
+  NormOnly      normalized_mse, best/ES val_loss
+  MeterOnly     meter_mae, best/ES val_mae_m_mask
+  NormThenMeter meter_mae from NormOnly, best/ES val_mae_m_mask
+  MeterThenNorm normalized_mse from MeterOnly, best/ES val_mae_m_mask
+
+Formal encoder setting:
+  TRAINABLE_LAST_N_ENCODER_BLOCKS=0
