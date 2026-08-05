@@ -1,0 +1,4 @@
+preset,river,river_label,segment_id,line_id,first_point_id,last_point_id,n_sampling_points,selection_mae_m,river_median_mae_m,final_pixels
+CA,CA_KlamathRiver_TopoBathy_2018_D18,CA Klamath,CA_L1344_P002896-002905,1344,2896,2905,10,0.18599356310174608,0.18599356310174608,21065
+CO,CO_UpperColorado_Topobathy_1_2020,CO Upper Colorado,CO_L2603_P001335-001344,2603,1335,1344,10,0.17747340007177367,0.17871632617512956,19767
+Santiam,OR_SantiamRiverTB_Topobathy_1_D23,OR Santiam,Santiam_L253_P000815-000824,253,815,824,10,0.2515622235779995,0.2494754225127788,22787
